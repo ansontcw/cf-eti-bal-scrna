@@ -1,0 +1,1116 @@
+---
+title: 'ETI single-cell analysis'
+author:
+- name: Anson Wong
+date: "`r Sys.Date()`"
+description: null
+output: html_document
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+xaringanExtra::use_panelset()
+
+```
+
+# 1 Load packages
+```{r}
+suppressPackageStartupMessages({
+library(Seurat)
+library(here)
+library(qs)
+library(forcats)
+library(pals)
+library(ggplot2)
+library(ggpubr)
+library(cowplot)
+library(speckle)
+library(rstatix)
+library(scCustomize)
+library(patchwork)
+library(dplyr)
+library(Cepo)
+library(phateR)
+library(slingshot)
+library(tradeSeq)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(ReactomePA)
+library(readr)
+library(DOSE)
+library(parallelDist)
+library(ggrepel)
+library(tibble)
+})
+set.seed(1990)
+
+```
+
+# 2 Analysis
+Annotation was performed on longitudinal samples.
+
+The sample size per condition for this analysis are as follows:
+n=3 CF.UT.BL
+n=3 CF.UT
+n=3 CF.ETI.BL
+n=3 CF.ETI
+
+## 2.1 Read processed object
+RecM
+```{r}
+# load analysis object
+celltype <- "RecM"
+seu <- qread(here("data","SCEs","final.annot",paste0("bal_",celltype,".final_annot.SEU.qs")),
+                  nthreads=16)
+latent.vars <- c("Bronchiectasis")
+```
+
+AM-CCL
+```{r}
+# load analysis object
+celltype <- "TRM-CCL"
+seu <- qread(here("data","SCEs","final.annot",paste0("bal_",celltype,".final_annot.SEU.qs")),
+                  nthreads=16)
+latent.vars <- c("Bronchiectasis")
+```
+
+Combined
+```{r}
+# load analysis object
+seu <- qread(here("data","SCEs","manual.annot",paste0("bal.SEU.qs")),
+                  nthreads=24)
+latent.vars <- c("Bronchiectasis")
+seu.backup <- seu
+```
+
+Cytokine
+```{r}
+res.final <- qread(here("data","cytokine","res_ETI.master.qs"))
+
+```
+
+## 2.2 Prepare object for downstream analysis
+Run this for RecM, AM-CCL, and Combined
+```{r}
+# Subset object
+seu.backup <- seu
+seu <- subset(seu.backup, 
+              sampleID %in% c("M1C160(1)","M1C160F", # CF-S1, treated
+                              "M1C177","M1C177C", # CF-M3, treated
+                              "M1C188","M1C188B", # CF-S3, treated
+                              "M1C170C","M1C170D", # CF-M1, untreated
+                              "M1C176", "M1C176C", # CF-M2
+                              "M1C180","M1C180D", # CF-M4
+                              "M1N066","M1N075","M1N078","M1N080","M1N087","M1N092" #HC1-6
+                              ))
+seu$Condition <- fct_drop(seu$Condition)
+seu$sampleID <- fct_drop(seu$sampleID)
+
+# Assign ID for analysis
+seu$sampleID <- factor(seu$sampleID,
+                       levels=c("M1N066","M1N075","M1N078","M1N080","M1N087","M1N092", #HC1-6
+                              "M1C170C","M1C170D", # CF-M1, untreated
+                              "M1C176","M1C176C", # CF-M2, untreated
+                              "M1C180","M1C180D", # CF-M4, untreated
+                              "M1C160(1)","M1C160F", # CF-S1, treated
+                              "M1C177","M1C177C", # CF-M3, treated
+                              "M1C188","M1C188B" # CF-S3, treated
+                              ))
+
+# Add Condition2
+draft1 <- factor(
+      case_when(
+        seu$Condition == "Control" ~ "C"))
+draft2 <- factor(
+  case_when(
+    seu$Bronchiectasis == "No" ~ "CFN",
+    seu$Bronchiectasis == "Yes" ~ "CFB"
+  )
+)
+
+Condition2 <- coalesce(draft1,draft2)
+names(Condition2) <- colnames(seu)
+seu <- AddMetaData(seu, Condition2, col.name = "Condition2")
+seu$Condition2 <- factor(seu$Condition2,levels=c("C","CFB","CFN"))
+
+# Add Timepoint
+Timepoint <- setNames(c(rep("t1",6),rep(c("t1","t2"),6)),
+                      levels(seu$sampleID))
+
+Timepoint <- setNames(factor(Timepoint[seu$sampleID],
+                             levels=c("t1","t2")),
+                      colnames(seu))
+seu <- AddMetaData(seu, Timepoint, col.name = "Timepoint")
+
+# Add Condition3, which is CF.BL at timepoint 1, and either CF.UT or CF.ETI at timepoint 2
+Condition3 <- setNames(c(rep("C",6),rep(c("UT1","UT2"),3),rep(c("pre-ETI","ETI"),3)),
+                      levels(seu$sampleID))
+
+Condition3 <- setNames(factor(Condition3[seu$sampleID],
+                             levels=c("C","UT1","UT2","pre-ETI","ETI")),
+                      colnames(seu))
+seu <- AddMetaData(seu, Condition3, col.name = "Condition3")
+
+
+# Assign analysis ID
+ID <- setNames(c(paste0("C-0",1:6),
+                 rep("CF-M1",2),rep("CF-M2",2),rep("CF-M4",2),
+                 rep("CF-S1",2),rep("CF-M3",2),rep("CF-S3",2)),
+               levels(seu$sampleID))
+
+ID <- setNames(factor(ID[seu$sampleID],
+                      levels=c(paste0("HC-0",1:6),
+                               "CF-M1","CF-M2","CF-M4",
+                               "CF-S1","CF-M3","CF-S3")),
+               colnames(seu))
+
+seu <- AddMetaData(seu, ID, col.name = "ID")
+
+# Assign analysis ID2
+ID2 <- setNames(c(paste0("HC-0",1:6),
+                  "CF-01_BL","CF-01_UT",
+                  "CF-02_BL","CF-02_UT",
+                  "CF-03_BL","CF-03_UT",
+                  "CF-04_BL","CF-04_ETI",
+                  "CF-05_BL","CF-05_ETI",
+                  "CF-06_BL","CF-06_ETI"),
+                 levels(seu$sampleID))
+
+ID2 <- setNames(factor(ID2[seu$sampleID],
+                       levels=c(paste0("HC-0",1:6),
+                                paste0("CF-0",1:3,"_BL"),
+                                paste0("CF-0",1:3,"_UT"),
+                                paste0("CF-0",4:6,"_BL"),
+                                paste0("CF-0",4:6,"_ETI"))),
+                colnames(seu))
+
+seu <- AddMetaData(seu, ID2, col.name = "ID2")
+
+# Assign batchID 2
+draft1 <- factor(
+      case_when(
+        seu$sampleID %in% c("M1C170C","M1C176") ~ "batch 1"))
+
+seu <- AddMetaData(seu, draft1, col.name = "draft1")
+
+seu$batchID <- factor(seu$batchID,
+                       levels=c("A","B","C","D"))
+
+draft2 <- setNames(c("batch 3","batch 4","batch 2", "batch 1"),
+                     levels(seu$batchID))
+
+draft2 <- setNames(factor(draft2[seu$batchID],levels=paste0("batch ",1:4)),
+                     colnames(seu))
+
+seu <- AddMetaData(seu, draft2, col.name = "draft2")
+
+# coalesce two draft columns
+seu@meta.data %>%
+  mutate(batchID2=coalesce(draft1,draft2)) -> seu@meta.data
+
+# reorder levels
+seu$batchID2 <- factor(seu$batchID2,
+                       levels=paste0("batch ",1:4))
+
+# remove draft columns
+seu$draft2 <- NULL
+
+# Factorize latent variables
+seu$Bronchiectasis <- factor(seu$Bronchiectasis)
+#seu$subtype <- factor(seu$subtype)
+
+seu.backup <- NULL
+gc()
+
+s <- seu
+
+# Set colors
+Condition2.colours <- setNames(c("#26547c","#ffd166","#ef476f"),
+                               levels(seu$Condition2))
+Condition3.colours <- setNames(c("#26547c","#dda15e","#bc6c25","#a3b18a","#588157"),
+                               levels(seu$Condition3))
+batch.colours <- setNames(rev(c("#e07a5f", "#3d405b", "#81b29a", "#f2cc8f")),
+                          levels(seu$batchID2))
+```
+
+Backup objects: RecM
+```{r}
+seu.RecM <- s
+```
+
+Backup objects: AM-CCL
+```{r}
+seu.AMCCL <- s
+```
+
+## 2.3 MDS
+### 2.3.1 Aggregate expression
+```{r}
+# Aggregate expression
+DefaultAssay(seu) <- "RNA"
+#seu <- NormalizeData(seu)
+#seu <- ScaleData(seu)
+
+seu.pseudobulk <- AggregateExpression(seu,
+                           group.by = c("sampleID"),
+                           #features = deg,
+                           slot = "counts",
+                           return.seurat = TRUE,
+                           assays = "RNA")
+seu.pseudobulk <- NormalizeData(seu.pseudobulk)
+seu.pseudobulk <- ScaleData(seu.pseudobulk)
+
+```
+
+### 2.3.2 Define genes
+```{r}
+# cytokine genes n=48
+mapping_csv <- read.csv(here("data","cytokine","human_cytokine_gene_map.csv"))
+deg <- (mapping_csv %>% filter(Cytokine %in% res.final$cyto_vars))$Gene
+deg <- deg[deg %in% rownames(seu.pseudobulk)]
+length(deg)
+
+# profibrotic cytokine genes
+fibro.cytokines <- c(
+  "BAFF/TNFSF13B", "sCD30/TNFRSF8", "sCD163", "Chitinase-3-like1",
+  "gp130/sIL-6Rβ", "sIL-6Rα", "Osteopontin", "Pentraxin-3", "TSLP",
+  "TWEAK/TNFSF12", "FGFbasic", "Eotaxin", "IL-1β", "IL-5",
+  "IL-8", "IL-13", "MCP-1(MCAF)", "SDF-1α", "PDGF-BB","M-CSF"
+)
+deg <- (mapping_csv %>% dplyr::filter(Cytokine %in% fibro.cytokines))$Gene
+deg <- deg[deg %in% rownames(seu.pseudobulk)]
+
+# # combined CF.ETI vs CF.ETI.BL DEGs
+# celltype <- "combined"
+# 
+# # prepare DEGs
+# # compare.list <- setNames(c("CF.ETI vs CF.ETI.BL","CF.UT vs CF.UT.BL","CF.ETI vs HC","CF.UT vs HC"),
+# #                          c("CF.ETI_vs_CF.ETI.BL","CF.UT_vs_CF.UT.BL","CF.ETI_vs_HC","CF.UT_vs_HC"))
+# compare.list <- setNames(c("CF.ETI vs CF.ETI.BL"),
+#                          c("CF.ETI_vs_CF.ETI.BL"))
+# # compare.list <- setNames(c("CF.ETI vs CF.ETI.BL","CF.UT vs CF.UT.BL"),
+# #                          c("CF.ETI_vs_CF.ETI.BL","CF.UT_vs_CF.UT.BL"))
+# 
+# compare.list <- setNames(c("CF.UT vs CF.UT.BL"),
+#                          c("CF.UT_vs_CF.UT.BL"))
+# 
+# deg <- c()
+# for (compare in names(compare.list)) {
+#   celltype <- "combined"
+#   # read DE files
+#   up <- read.csv(here("data","DE",celltype,compare,"DEG",paste0(celltype,".",compare,".DEG-up.csv")))
+#   down <- read.csv(here("data","DE",celltype,compare,"DEG",paste0(celltype,".",compare,".DEG-down.csv")))
+#   deg <- unique(c(deg, up$gene, down$gene))
+# }
+# 
+# length(deg)
+
+```
+
+### 2.3.3 Plot MDS [whole BAL]
+#### 2.3.3.1 All cytokine genes
+```{r fig.width=9, fig.height=4}
+# Get matrix
+mtx <- as.matrix(t(GetAssayData(seu.pseudobulk, assay = "RNA", slot = "scale.data")))[,deg]
+df <- data.frame(mtx)
+# Before running MDS, we first calculate a distance matrix between all pairs of cells.  Here
+# we use a simple euclidean distance metric on all genes, using scale.data as input
+d <- parallelDist(mtx,threads=16)
+# Run the MDS procedure, k determines the number of dimensions
+mds <- cmdscale(d = d, k = 2)
+
+# mds1 = single-cell
+#mds1 <- mds
+
+# cmdscale returns the cell embeddings, we first label the columns to ensure downstream
+# consistency
+colnames(mds) <- paste0("MDS_", 1:2)
+# We will now store this as a custom dimensional reduction called 'mds'
+seu.pseudobulk[["mds"]] <- CreateDimReducObject(embeddings = mds, key = "MDS_", assay = DefaultAssay(seu.pseudobulk))
+seu.pseudobulk <- AddMetaData(seu.pseudobulk, seu.pseudobulk@reductions$mds@cell.embeddings[,1],col.name = "MDS_1")
+seu.pseudobulk <- AddMetaData(seu.pseudobulk, seu.pseudobulk@reductions$mds@cell.embeddings[,2],col.name = "MDS_2")
+
+# We can now use this as you would any other dimensional reduction in all downstream functions
+seu.pseudobulk <- AddMetaData(seu.pseudobulk, factor(rownames(seu.pseudobulk@meta.data),
+                                                     levels=rownames(seu.pseudobulk@meta.data)),col.name = "sampleID")
+seu.pseudobulk <- AddMetaData(seu.pseudobulk, factor(c(rep("C",6),rep(c("CF.UT.BL","CF.UT"),3),rep(c("CF.ETI.BL","CF.ETI"),3)),
+                                                     levels=c("C","CF.UT.BL","CF.UT","CF.ETI.BL","CF.ETI")),
+                                                     col.name = "Condition")
+seu.pseudobulk <- AddMetaData(seu.pseudobulk, factor(c("batch 4",
+                                                       "batch 1",
+                                                       "batch 4",
+                                                       "batch 3",
+                                                       "batch 3",
+                                                       "batch 1",
+                                                       "batch 1",
+                                                       "batch 1",
+                                                       "batch 1",
+                                                       "batch 1",
+                                                       "batch 2",
+                                                       "batch 2",
+                                                       "batch 1",
+                                                       "batch 1",
+                                                       "batch 2",
+                                                       "batch 2",
+                                                       "batch 1",
+                                                       "batch 1")),
+                                                     col.name = "batchID2")
+seu.pseudobulk$batchID2 <- factor(seu.pseudobulk$batchID2, levels=c("batch 1","batch 2","batch 3","batch 4"))
+
+Condition.colours <- setNames(c("#26547c","#dda15e","#bc6c25","#a3b18a","#588157"),
+                               levels(seu.pseudobulk$Condition))
+sample.colours <- setNames(c(rep("#26547c",6),rep(c("#dda15e","#bc6c25"),3),rep(c("#a3b18a","#588157"),3)),
+                           levels(seu.pseudobulk$sampleID))
+
+# --- Extract embeddings and metadata safely (avoid duplicate MDS_* columns) ---
+emb <- as.data.frame(seu.pseudobulk@reductions$mds@cell.embeddings)
+colnames(emb) <- c("MDS_1", "MDS_2")
+emb$sampleID <- rownames(emb)
+
+meta <- as.data.frame(seu.pseudobulk@meta.data)
+
+# drop any MDS_* in meta to avoid .x/.y names on join
+meta <- meta %>% select(-matches("^MDS_\\d+$"), everything())
+
+# join by sampleID (meta may already have sampleID column)
+if ("sampleID" %in% names(meta)) {
+  emb <- emb %>% left_join(meta, by = "sampleID")
+} else {
+  emb <- emb %>% left_join(meta %>% tibble::rownames_to_column("sampleID"), by = "sampleID")
+}
+
+# Ensure canonical MDS_1 / MDS_2 exist
+if (!("MDS_1" %in% names(emb)) && any(grepl("^MDS_1", names(emb)))) {
+  emb$MDS_1 <- emb[[ grep("^MDS_1", names(emb))[1] ]]
+}
+if (!("MDS_2" %in% names(emb)) && any(grepl("^MDS_2", names(emb)))) {
+  emb$MDS_2 <- emb[[ grep("^MDS_2", names(emb))[1] ]]
+}
+
+# Ensure Condition and sampleID factors match Seurat object definitions (keeps legend order)
+emb$Condition <- factor(emb$Condition, levels = levels(seu.pseudobulk$Condition))
+emb$sampleID  <- factor(emb$sampleID,  levels = levels(seu.pseudobulk$sampleID))
+
+# Create SubjectID (first 6 chars for IDs starting with "M") to find pairs
+emb <- emb %>%
+  mutate(SubjectID = ifelse(startsWith(as.character(sampleID), "M"),
+                            substr(as.character(sampleID), 1, 6),
+                            as.character(sampleID)))
+
+# --- Aggregate treatment to only C / ETI / UT and derive timepoint (TP1/TP2) ---
+emb <- emb %>%
+  mutate(
+    # aggregated treatment only
+    treatment = case_when(
+      Condition == "C"                      ~ "C",
+      Condition %in% c("CF.ETI.BL", "CF.ETI")~ "ETI",
+      Condition %in% c("CF.UT.BL",  "CF.UT") ~ "UT",
+      TRUE                                    ~ NA_character_
+    ),
+    # timepoint: baseline (.BL) -> TP1, otherwise TP2 (controls treated as TP1)
+    timepoint = case_when(
+      grepl("\\.BL$", Condition) ~ "TP1",
+      Condition == "HC"          ~ "TP1",
+      TRUE                       ~ "TP2"
+    )
+  )
+
+# Factor ordering
+emb$treatment <- factor(emb$treatment, levels = c("C", "UT", "ETI"))
+emb$timepoint <- factor(emb$timepoint, levels = c("TP1", "TP2"))
+
+# --- Colour, fill and shape mapping (following cytokine PCA) ---
+stroke_cols <- c("C" = "#26547c", "ETI" = "#3a5a40", "UT" = "#936639")
+shape_map   <- c("C" = 4, "ETI" = 24, "UT" = 21)
+
+# fill: TP1 -> white (unfilled), TP2 -> treatment colour
+emb <- emb %>%
+  mutate(fill_col = ifelse(timepoint == "TP1", "white", stroke_cols[as.character(treatment)]))
+
+# --- Prepare lines for paired samples (connect TP1 -> TP2) ---
+lines_df <- emb %>%
+  group_by(SubjectID) %>%
+  filter(n() > 1) %>%
+  arrange(SubjectID, timepoint) %>% # ensure ordering TP1 -> TP2
+  ungroup()
+
+# --- Sample-labelled panel (optional) ---
+centroids_sample <- emb %>%
+  group_by(sampleID) %>%
+  summarize(x = mean(MDS_1, na.rm = TRUE), y = mean(MDS_2, na.rm = TRUE), .groups = "drop")
+
+p_sample <- ggplot(emb, aes(x = MDS_1, y = MDS_2, color = sampleID)) +
+  geom_point(size = 4) +
+  geom_text_repel(
+    data = centroids_sample,
+    aes(x = x, y = y, label = sampleID),
+    inherit.aes = FALSE,
+    size = 3.2,
+    box.padding = 0.3,
+    point.padding = 0.3,
+    segment.size = 0.3,
+    max.overlaps = Inf
+  ) +
+  scale_color_manual(values = setNames(rep("#666666", length(levels(emb$sampleID))), levels(emb$sampleID))) +
+  labs(title = "SampleID") +
+  NoLegend() +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text        = element_text(size = 12),
+    axis.title       = element_text(size = 14),
+    panel.border     = element_rect(color = "black", fill = NA, size = 0.7),
+    axis.line        = element_blank(),
+    legend.position  = "none",
+    plot.title       = element_text(hjust = 0.5)
+  )
+
+# --- Treatment-styled MDS plot: shapes = treatment, stroke = treatment colour, fill = TP1 (white) or TP2 (colour) ---
+title <- "Profibrotic cytokine genes"
+#title <- "Cytokine level"
+p_treatment <- ggplot(emb, aes(x = MDS_1, y = MDS_2)) +
+  # paired connectors (behind points)
+  geom_path(
+    data = lines_df,
+    aes(x = MDS_1, y = MDS_2, group = SubjectID),
+    inherit.aes = FALSE,
+    color = "grey40",
+    size = 0.7,
+    alpha = 0.85
+  ) +
+
+  # points on top: map shape & stroke by treatment, fill by precomputed fill_col (identity)
+  geom_point(aes(shape = treatment, color = treatment, fill = fill_col),
+             size = 3.8, stroke = 0.9, alpha = 0.98) +
+
+  # ellipse only for controls (treatment == "C")
+  stat_ellipse(
+    data = emb %>% filter(treatment == "C"),
+    aes(x = MDS_1, y = MDS_2, group = treatment),
+    type = "norm", level = 0.68,
+    geom = "polygon", alpha = 0.18, colour = NA,fill="#26547c", inherit.aes = FALSE, show.legend = FALSE
+  ) +
+
+  # NOTE: removed geom_text_repel that labeled treatments inside the plot (C/ETI/UT)
+
+  # scales: stroke colours by treatment, fill uses identity (per-sample)
+  scale_color_manual(values = stroke_cols, guide = "none") +
+  scale_fill_identity(guide = "none") +
+
+  # shape legend only; rename to "Treatment"
+  scale_shape_manual(name = "Treatment", values = shape_map,
+                     breaks = c("C", "UT", "ETI"),
+                     labels = c("C", "UT", "ETI")) +
+
+  labs(title = title) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text        = element_text(size = 12),
+    axis.title       = element_text(size = 14),
+    panel.border     = element_rect(color = "black", fill = NA, size = 0.7),
+    axis.line        = element_blank(),
+    legend.position  = "right",
+    plot.title       = element_text(hjust = 0.5)
+  )
+
+# Combine and display side-by-side
+p_combined <- p_sample | p_treatment
+print(p_combined)
+
+p_treatment.combined <- p_treatment
+```
+
+#### 2.3.3.2 All cytokine genes [batch]
+```{r fig.height=4, fig.width=5}
+# palette you provided (names "batch 1" ... "batch 4")
+batch.colours <- setNames(
+  rev(c("#e07a5f", "#3d405b", "#81b29a", "#f2cc8f")),
+  c(paste0("batch ", 1:4))
+)
+
+# ensure batchID2 strings match the palette names (add "batch " prefix only if missing)
+emb$batchID2 <- as.character(emb$batchID2)
+if (!any(grepl("^batch", emb$batchID2))) {
+  emb$batchID2 <- paste("batch", emb$batchID2)
+}
+
+# show batch only for UT and ETI, NA for controls (C)
+emb$batch_shown <- ifelse(emb$treatment %in% c("UT", "ETI"), emb$batchID2, NA_character_)
+
+# keep only palette entries actually present in batch_shown
+present_batches <- intersect(names(batch.colours), unique(na.omit(emb$batch_shown)))
+batch.colours2 <- batch.colours[present_batches]
+
+p_batch <- ggplot(emb, aes(x = MDS_1, y = MDS_2)) +
+  # points: shape by treatment (unchanged), fill by batch_shown (NA for C)
+  geom_point(aes(shape = treatment, fill = batch_shown),
+             size = 3.8, stroke = 0.9, alpha = 0.98) +
+
+  # paired connectors (behind points)
+  geom_path(
+    data = lines_df,
+    aes(x = MDS_1, y = MDS_2, group = SubjectID),
+    inherit.aes = FALSE,
+    color = "grey10",
+    size = 0.7,
+    alpha = 0.85
+  ) +
+
+  # ellipse only for controls (treatment == "C")
+  stat_ellipse(
+    data = emb %>% filter(treatment == "C"),
+    aes(x = MDS_1, y = MDS_2, group = treatment),
+    type = "norm", level = 0.68,
+    geom = "polygon", alpha = 0.18, colour = NA, fill = "#26547c",
+    inherit.aes = FALSE, show.legend = FALSE
+  ) +
+
+  # manual fill for Batch: don't show NA, and draw filled legend keys
+  scale_fill_manual(
+    name = "Batch",
+    values = batch.colours2,
+    na.translate = FALSE,
+    guide = guide_legend(override.aes = list(shape = 21, colour = "black"))
+  ) +
+
+  # keep your existing shape mapping (shape_map unchanged)
+  scale_shape_manual(name = "Treatment", values = shape_map,
+                     breaks = c("C", "UT", "ETI"),
+                     labels = c("C", "UT", "ETI")) +
+
+  labs(title = "Cytokine gene expression") +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text        = element_text(size = 12),
+    axis.title       = element_text(size = 14),
+    panel.border     = element_rect(color = "black", fill = NA, size = 0.7),
+    axis.line        = element_blank(),
+    legend.position  = "right",
+    plot.title       = element_text(hjust = 0.5)
+  )
+
+p_batch
+```
+
+
+## 2.6 Pseudobulk gene expression in RecM
+### 2.6.1 Function
+```{r}
+plot_pb_gene <- function(pb_seu,
+                          gene,
+                          assay = "RNA",
+                          slot = "data",
+                          condition_col = "Condition3",
+                          pairing_col = "subjectID",
+                          pal = Condition3.colours,
+                          zero_filter = TRUE,
+                          connect_pairs = TRUE,
+                          show_stats = TRUE,
+                          step_increase = 0.5,
+                          treatment_levels = c("UT1","UT2","pre-ETI","ETI")) {
+  # minimal checks
+  if (missing(pb_seu)) stop("pb_seu required")
+  if (missing(gene)) stop("gene required")
+  if (!requireNamespace("Seurat", quietly = TRUE)) stop("Seurat required")
+  if (!requireNamespace("ggplot2", quietly = TRUE)) stop("ggplot2 required")
+  if (show_stats && !requireNamespace("ggpubr", quietly = TRUE)) {
+    warning("ggpubr not installed; stat brackets disabled")
+    show_stats <- FALSE
+  }
+
+  # get expression matrix and metadata
+  mat <- Seurat::GetAssayData(pb_seu, assay = assay, slot = slot)
+  if (!gene %in% rownames(mat)) stop("gene not found in assay rows")
+  meta_df <- as.data.frame(pb_seu@meta.data, stringsAsFactors = FALSE)
+
+  # align metadata to columns
+  sample_ids <- colnames(mat)
+  if (!is.null(rownames(meta_df)) && all(sample_ids %in% rownames(meta_df))) {
+    meta_df <- meta_df[sample_ids, , drop = FALSE]
+  } else if ("sampleID" %in% names(meta_df) && all(sample_ids %in% meta_df$sampleID)) {
+    rownames(meta_df) <- meta_df$sampleID
+    meta_df <- meta_df[sample_ids, , drop = FALSE]
+  } else {
+    # best-effort normalized match or intersection
+    norm <- function(x) tolower(gsub("[^[:alnum:]]+", "", as.character(x)))
+    mm <- match(norm(sample_ids), norm(rownames(meta_df)))
+    if (all(!is.na(mm))) {
+      meta_df <- meta_df[mm, , drop = FALSE]
+      rownames(meta_df) <- sample_ids
+    } else {
+      common <- intersect(sample_ids, rownames(meta_df))
+      if (length(common) == 0) stop("No overlap between assay cols and metadata rownames")
+      keep <- sample_ids %in% common
+      mat <- mat[, keep, drop = FALSE]
+      sample_ids <- colnames(mat)
+      meta_df <- meta_df[sample_ids, , drop = FALSE]
+    }
+  }
+
+  if (!condition_col %in% names(meta_df)) stop("condition_col not found in metadata")
+
+  # build plotting dataframe; protect against duplicate names
+  gene_col <- paste0(gene, "_expr")
+  expr_vec <- as.numeric(mat[gene, , drop = TRUE])
+  plot_df <- data.frame(sampleID = sample_ids, stringsAsFactors = FALSE)
+  plot_df[[gene_col]] <- expr_vec
+  meta_for_bind <- meta_df
+  if ("sampleID" %in% names(meta_for_bind)) meta_for_bind$sampleID <- NULL
+  if (gene_col %in% names(meta_for_bind)) meta_for_bind[[gene_col]] <- NULL
+  plot_df <- cbind(plot_df, meta_for_bind[plot_df$sampleID, , drop = FALSE])
+
+  # simple filtering: remove NAs and optional zero filter
+  if (zero_filter) plot_df <- plot_df[!is.na(plot_df[[gene_col]]) & plot_df[[gene_col]] != 0, , drop = FALSE]
+  else plot_df <- plot_df[!is.na(plot_df[[gene_col]]), , drop = FALSE]
+
+  # remove controls ("C") entirely
+  plot_df <- plot_df[plot_df[[condition_col]] != "C", , drop = FALSE]
+
+  # require condition present
+  plot_df <- plot_df[!is.na(plot_df[[condition_col]]), , drop = FALSE]
+  if (nrow(plot_df) == 0) stop("No samples available after filtering/matching")
+
+  # factorize Treatment using provided treatment_levels (ensures numeric x ordering)
+  plot_df$Treatment <- factor(as.character(plot_df[[condition_col]]), levels = treatment_levels)
+  # drop samples with NA Treatment (i.e., not in treatment_levels)
+  plot_df <- plot_df[!is.na(plot_df$Treatment), , drop = FALSE]
+  if (nrow(plot_df) == 0) stop("No samples with requested treatment levels present")
+
+  # pairing column
+  if (!pairing_col %in% names(plot_df)) pairing_col <- NULL
+  if (!is.null(pairing_col)) plot_df[[pairing_col]] <- as.factor(plot_df[[pairing_col]])
+
+  # palette: ensure it maps to treatment_levels (subset if needed)
+  levs <- levels(plot_df$Treatment)
+  if (!is.null(pal) && !is.null(names(pal))) {
+    pal <- pal[intersect(levs, names(pal))]
+    missing_levs <- setdiff(levs, names(pal))
+    if (length(missing_levs) > 0) {
+      extras <- RColorBrewer::brewer.pal(max(3, length(missing_levs)), "Dark2")
+      pal <- c(pal, setNames(extras[seq_along(missing_levs)], missing_levs))
+    }
+    pal <- pal[levs]
+  } else {
+    pal_vals <- RColorBrewer::brewer.pal(max(3, length(levs)), "Dark2")
+    pal <- setNames(pal_vals[seq_along(levs)], levs)
+  }
+
+  # compute pairwise tests for two comparisons of interest (ETI vs pre-ETI, UT2 vs UT1)
+  stat.test.pb <- NULL
+  if (show_stats) {
+    comps <- list(c("ETI","pre-ETI"), c("UT2","UT1"))
+    res_list <- list()
+    for (cmp in comps) {
+      gA <- cmp[1]; gB <- cmp[2]
+      if (!(gA %in% levs && gB %in% levs)) next
+      valsA <- plot_df[[gene_col]][plot_df$Treatment == gA]
+      valsB <- plot_df[[gene_col]][plot_df$Treatment == gB]
+      pval <- NA_real_
+      # try paired test if pairing_col exists and there are >=2 shared subjects
+      if (!is.null(pairing_col)) {
+        idsA <- unique(plot_df[[pairing_col]][plot_df$Treatment == gA])
+        idsB <- unique(plot_df[[pairing_col]][plot_df$Treatment == gB])
+        shared <- intersect(idsA, idsB)
+        if (length(shared) >= 2) {
+          xa <- sapply(shared, function(s) plot_df[[gene_col]][plot_df$Treatment == gA & plot_df[[pairing_col]] == s][1])
+          xb <- sapply(shared, function(s) plot_df[[gene_col]][plot_df$Treatment == gB & plot_df[[pairing_col]] == s][1])
+          keep <- !is.na(xa) & !is.na(xb)
+          xa <- xa[keep]; xb <- xb[keep]
+          if (length(xa) >= 2) pval <- tryCatch(wilcox.test(xa, xb, paired = TRUE)$p.value, error = function(e) NA_real_)
+        }
+      }
+      # fallback to unpaired if paired couldn't be run
+      if (is.na(pval)) {
+        if (length(valsA) >= 2 && length(valsB) >= 2) {
+          pval <- tryCatch(wilcox.test(valsA, valsB, paired = FALSE)$p.value, error = function(e) NA_real_)
+        } else {
+          pval <- NA_real_
+        }
+      }
+      res_list[[paste(gA,gB,sep="_")]] <- data.frame(group1 = gA, group2 = gB, p = pval, stringsAsFactors = FALSE)
+    }
+    if (length(res_list) > 0) {
+      stat.test.pb <- do.call(rbind, res_list)
+      stat.test.pb$p.adj <- p.adjust(stat.test.pb$p, method = "BH")
+      stat.test.pb$p.adj.signif <- sapply(stat.test.pb$p.adj, function(pv) {
+        if (is.na(pv)) return(NA_character_)
+        if (pv < 1e-4) "****" else if (pv < 1e-3) "***" else if (pv < 1e-2) "**" else if (pv < 0.05) "*" else "ns"
+      })
+      # compute y positions using fixed scalar step_increase
+      # compute per-comparison y from the global max of plotted values
+      y_max <- max(plot_df[[gene_col]], na.rm = TRUE)
+      ncomp <- nrow(stat.test.pb)
+      if (ncomp > 0) {
+        stat.test.pb$xmin <- match(stat.test.pb$group1, levs)
+        stat.test.pb$xmax <- match(stat.test.pb$group2, levs)
+        stat.test.pb$y.position <- y_max + seq_len(ncomp) * step_increase
+      } else stat.test.pb <- NULL
+    }
+  }
+
+  # Build the plot: numeric x for exact line connection, points colored by Treatment
+  library(ggplot2)
+  library(ggrepel)
+  # minimal additions: map three ETI subjectIDs to short labels and compute label positions
+  label_map <- c(M1C177 = "E1", M1C160 = "E2", M1C188 = "E3")
+  label_df <- subset(plot_df, Treatment == "ETI" & subjectID %in% names(label_map))
+  if (nrow(label_df) > 0) {
+    label_df$ETI_label <- label_map[as.character(label_df$subjectID)]
+    # place label to the right of the point (same y as point)
+    label_df$label_y <- label_df[[gene_col]]
+  }
+  
+  p <- ggplot() +
+  # lines (numeric x) connecting paired points exactly
+  { if (connect_pairs && !is.null(pairing_col)) {
+      pair_counts <- table(plot_df[[pairing_col]])
+      valid_pairs <- names(pair_counts)[pair_counts >= 2]
+      if (length(valid_pairs) > 0) {
+        lines_df <- plot_df[plot_df[[pairing_col]] %in% valid_pairs, , drop = FALSE]
+        lines_df <- lines_df[order(lines_df[[pairing_col]], as.numeric(lines_df$Treatment)), , drop = FALSE]
+        geom_line(data = lines_df,
+                  aes(x = as.numeric(Treatment), y = .data[[gene_col]], group = .data[[pairing_col]]),
+                  color = "grey70", size = 0.5)
+      } else NULL
+    } else NULL } +
+  # points at numeric x
+  geom_point(data = plot_df,
+             aes(x = as.numeric(Treatment), y = .data[[gene_col]], color = Treatment),
+             size = 2.5) +
+  # use ggrepel to place labels and draw connecting segments to the points
+  { if (exists("label_df") && nrow(label_df) > 0) {
+      geom_text_repel(
+        data = label_df,
+        aes(x = as.numeric(Treatment), y = .data[[gene_col]], label = ETI_label),
+        nudge_x = 1,            # push labels to the right of the points
+        hjust = 0.5,
+        size = 3.5,
+        fontface = "bold",        
+        color = "#3A5A40",
+        segment.size = 0.35,       # line thickness connecting label -> point
+        segment.color = "grey60",
+        box.padding = 0.25,
+        point.padding = 0.3,
+        max.overlaps = Inf,
+        show.legend = FALSE
+      )
+    } else NULL } +
+  # x axis: numeric positions labeled by treatments
+  scale_x_continuous(breaks = seq_along(treatment_levels),
+                     labels = c("Baseline","UT","Baseline","ETI"),
+                     limits = c(0.5, length(treatment_levels) + 0.5)) +
+  scale_color_manual(values = pal) +
+  labs(y = "log1p exprssion", x="Treatment",color = "Treatment", title = gene) +
+  theme_classic(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1, size = 10),
+        legend.position = "right",
+        plot.title = element_text(hjust = 0.5, face = "bold.italic")) + NoLegend()
+
+  # add p-value brackets if computed
+  if (show_stats && !is.null(stat.test.pb) && nrow(stat.test.pb) > 0) {
+    p <- p + ggpubr::stat_pvalue_manual(stat.test.pb,
+                                        label = "p.adj.signif",
+                                        y.position = "y.position",
+                                        tip.length = 0.01, bracket.size = 0.4, hide.ns = TRUE)
+  }
+
+  return(p)
+}
+
+# plot with controls
+combine_with_control_box <- function(plot_a,
+                                     pb_seu,
+                                     gene,
+                                     assay = "RNA",
+                                     slot = "data",
+                                     condition_col = "Condition3",
+                                     control_label = "C",
+                                     control_colour = "#26547c",
+                                     box_width = 0.6,
+                                     dodge_width = 0.6,
+                                     patchwork_widths = c(3, 1)) {
+  if (missing(plot_a) || !inherits(plot_a, "ggplot")) stop("plot_a (ggplot) is required")
+  if (missing(pb_seu) || missing(gene)) stop("pb_seu and gene are required")
+
+  if (!requireNamespace("Seurat", quietly = TRUE)) stop("Seurat required")
+
+  # 1. extract expression + metadata
+  mat <- tryCatch(Seurat::GetAssayData(pb_seu, assay = assay, slot = slot),
+                  error = function(e) stop("Failed to GetAssayData(): ", conditionMessage(e)))
+  if (!gene %in% rownames(mat)) stop(sprintf("Gene '%s' not found in assay rows", gene))
+
+  meta_df <- as.data.frame(pb_seu@meta.data, stringsAsFactors = FALSE)
+  sample_ids <- colnames(mat)
+  if (!is.null(rownames(meta_df)) && all(sample_ids %in% rownames(meta_df))) {
+    meta_df <- meta_df[sample_ids, , drop = FALSE]
+  } else if ("sampleID" %in% names(meta_df) && all(sample_ids %in% meta_df$sampleID)) {
+    rownames(meta_df) <- meta_df$sampleID
+    meta_df <- meta_df[sample_ids, , drop = FALSE]
+  } else {
+    common <- intersect(sample_ids, rownames(meta_df))
+    if (length(common) == 0) stop("No overlap between assay columns and pb_seu metadata rownames")
+    mat <- mat[, common, drop = FALSE]
+    sample_ids <- colnames(mat)
+    meta_df <- meta_df[sample_ids, , drop = FALSE]
+  }
+
+  if (!condition_col %in% names(meta_df)) stop(sprintf("condition_col '%s' not found in pb_seu metadata", condition_col))
+
+  # avoid name conflicts when cbind'ing
+  conflicts <- intersect(names(meta_df), c("sampleID", "expr", gene))
+  if (length(conflicts) > 0) meta_df <- meta_df[, setdiff(names(meta_df), conflicts), drop = FALSE]
+
+  expr_vec <- as.numeric(mat[gene, , drop = TRUE])
+  df_all <- data.frame(sampleID = sample_ids, expr = expr_vec, stringsAsFactors = FALSE)
+  df_all <- cbind(df_all, meta_df[sample_ids, , drop = FALSE])
+  if (any(duplicated(names(df_all)))) names(df_all) <- make.unique(names(df_all))
+
+  # subset controls
+  df_ctrl <- df_all[df_all[[condition_col]] == control_label, , drop = FALSE]
+  if (nrow(df_ctrl) == 0) stop(sprintf("No control samples with %s == '%s' found", condition_col, control_label))
+
+  # 2. infer y-limits and y-label from plot_a
+  y_limits <- NULL
+  y_label  <- NULL
+  built <- tryCatch(ggplot2::ggplot_build(plot_a), error = function(e) NULL)
+  if (!is.null(built)) {
+    yvals <- unlist(lapply(built$data, function(ld) if (!is.null(ld$y)) ld$y else NULL))
+    if (length(yvals) > 0 && any(!is.na(yvals))) y_limits <- range(yvals, na.rm = TRUE)
+    if (is.null(y_limits) && length(built$layout$panel_scales_y) >= 1) {
+      rng <- tryCatch(built$layout$panel_scales_y[[1]]$range$range, error = function(e) NULL)
+      if (!is.null(rng) && length(rng) == 2) y_limits <- rng
+    }
+    if (!is.null(plot_a$labels$y) && nzchar(as.character(plot_a$labels$y))) y_label <- plot_a$labels$y
+  }
+  if (is.null(y_limits) || any(!is.finite(y_limits))) y_limits <- range(c(df_ctrl$expr, 0), na.rm = TRUE)
+  if (is.null(y_label) || !nzchar(as.character(y_label))) y_label <- if (!is.null(plot_a$labels$y)) plot_a$labels$y else "Expression"
+
+  # 3. build the control-only boxplot (no jitter) using position_dodge
+  df_ctrl$Control_x <- control_label
+
+  b <- ggplot(df_ctrl, aes(x = factor(Control_x, levels = control_label), y = expr)) +
+    geom_boxplot(width = box_width, outlier.shape = NA, fill = NA, colour = control_colour, position = position_dodge(width = dodge_width)) +
+    geom_point(position = position_dodge(width = dodge_width), size = 2.5, color = control_colour) +
+    scale_x_discrete(labels = control_label, name = "") +
+    coord_cartesian(ylim = y_limits) +
+    labs(y = y_label, title = NULL) +
+    theme_classic(base_size = 12) +
+    theme(
+      plot.title = element_blank(),
+      axis.text.x = element_text(angle = 40, hjust = 1, size = 10, colour = "black"),
+      axis.text.y = element_text(size = 12, colour = "black"),
+      axis.title.x = element_blank(),
+      legend.position = "none"
+    )
+
+  # 4. combine with patchwork
+  combined <- plot_a + b + patchwork::plot_layout(widths = patchwork_widths)
+  combined
+}
+
+```
+
+### 2.6.2 Prepare pseudobulk object
+```{r}
+# Aggregate raw RNA counts by BAL ID (pseudobulk)
+pseudo_bulk <- AggregateExpression(
+  seu, # or s
+  assays = "RNA",
+  slot = "counts",
+  group.by = "sampleID",
+  return.seurat = TRUE
+)
+
+pseudo_bulk <- NormalizeData(pseudo_bulk)
+
+# one minimal chunk: add Condition3, sampleID, and subjectID to pseudo_bulk (aligned to pseudo_bulk columns)
+# assumes `seu` (single-cell Seurat) and `pseudo_bulk` (AggregateExpression -> return.seurat = TRUE) exist
+
+sample_order <- colnames(pseudo_bulk)
+seu_sample_vec <- as.character(seu$sampleID)
+
+# align seu -> pseudo_bulk using exact match, fall back to normalized matching if needed
+idx <- match(sample_order, seu_sample_vec)
+if (any(is.na(idx))) {
+  norm <- function(x) tolower(gsub("[^[:alnum:]]+", "", as.character(x)))
+  idx2 <- match(norm(sample_order), norm(seu_sample_vec))
+  idx[is.na(idx)] <- idx2[is.na(idx)]
+}
+if (any(is.na(idx))) warning("Some pseudo_bulk samples were not found in seu$sampleID; corresponding Condition3 will be NA")
+
+# build metadata frame (rows in same order as pseudo_bulk columns)
+meta_df <- data.frame(
+  sampleID   = sample_order,
+  Condition3 = if ("Condition3" %in% colnames(seu@meta.data)) seu$Condition3[idx] else NA,
+  subjectID  = substr(sample_order, 1, 6),
+  row.names  = sample_order,
+  stringsAsFactors = FALSE
+)
+
+# preserve factor levels for Condition3 if present in seu
+if ("Condition3" %in% names(seu) && is.factor(seu$Condition3)) {
+  meta_df$Condition3 <- factor(meta_df$Condition3, levels = levels(seu$Condition3))
+}
+
+# add to pseudo_bulk and coerce subjectID to factor for pairing
+pseudo_bulk <- AddMetaData(pseudo_bulk, metadata = meta_df)
+pseudo_bulk$subjectID <- factor(pseudo_bulk$subjectID)
+
+# quick sanity checks
+pseudo_bulk@meta.data[, c("Condition3", "sampleID", "subjectID")]
+table(pseudo_bulk$subjectID, useNA = "ifany")
+```
+
+### 2.6.2 Plot
+```{r fig.height=3, fig.width=4}
+fibro.genes <- c("SPP1","CHIT1","CHI3L1","ITGB8","MMP9","MMP19","PLA2G7","LGMN","MERTK")
+inflam.genes <- c("CCL2","CCR2","CCL3","CCL4","IL6","CXCL8","IL1RN","TNFSF13","TNFSF12","TNFRSF1A","TNFSF13B","TNF","CSF1")
+genes <- c(fibro.genes, inflam.genes)
+
+# RecM
+plot.list <- list()
+plot.list <- lapply(genes, FUN = function(g) {
+  plot_pb_gene(
+    pb_seu = pseudo_bulk,
+    gene = g,
+    condition_col = "Condition3",            # metadata column name
+    pairing_col = "subjectID",
+    pal = Condition3.colours,                # palette vector
+  )
+})
+names(plot.list) <- genes
+
+plotC.list <- list()
+for (g in genes) {
+  p <- combine_with_control_box(plot_a = plot.list[[g]], pb_seu = pseudo_bulk, gene = g, condition_col = "Condition3")
+  plotC.list[[g]] <- p
+}
+
+# check plot
+plot.list$CHI3L1
+```
+
+# 3 Save figures
+```{r}
+# celltype <- "ETI"
+# out <- here("output","plots",celltype)
+# out <- here("output","plots",celltype,"expr_plot")
+# if(!dir.exists(out)) {
+#   dir.create(out,recursive = TRUE)
+# }
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 1600)
+# 
+# 
+# # MDS plots
+# # combined cytokine gene
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 1600)
+# 
+# ggsave(plot=p_sample + p_treatment +
+#   theme(plot.tag = element_text(size = 14, face = "bold", family="Arial")),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = here("data","plots","ETI","bal_ETI.combined.FibroCytoGenes.MDSplot.jpeg"),
+#        height=4,
+#        width=9)
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 100)
+# 
+# # combined cytokine gene by batch
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 1600)
+# 
+# ggsave(plot=p_batch +
+#          theme(plot.tag = element_text(size = 14, face = "bold", family="Arial")),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = here("data","plots","ETI","bal_ETI.combined.batch.MDSplot.jpeg"),
+#        height=4,
+#        width=5)
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 100)
+# 
+# # Box plot of pseudobulk marker genes in RecM
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 1600)
+# 
+# for (g in genes.am) {
+#   plotC.list[[g]] +
+#     theme(plot.tag = element_text(size = 14, face = "bold"))
+# 
+#   ggsave(plot=last_plot(),
+#          device="jpeg",
+#          dpi=1600,
+#          filename = paste0(out,"/","RecM.pseudobulk.",g,".jpeg"),
+#          height=4,
+#          width=4)
+# }
+# 
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 100)
+# 
+# 
+# # Box plot of pseudobulk marker genes in whole BAL
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 1600)
+# 
+# for (g in genes) {
+#   plotC.list[[g]] +
+#     theme(plot.tag = element_text(size = 14, face = "bold"))
+# 
+#   ggsave(plot=last_plot(),
+#          device="jpeg",
+#          dpi=1600,
+#          filename = paste0(out,"/","combined.pseudobulk.",g,".jpeg"),
+#          height=4,
+#          width=4)
+# }
+# 
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 100)
+```
+
+# 4 Save object
+```{r}
+celltype <- "ETI"
+out <- here("data","SCEs","analysis",celltype)
+if(!dir.exists(out)) {
+  dir.create(out,recursive = TRUE)
+}
+
+out <- here("data","SCEs","analysis",celltype,paste0("bal_",celltype,".analysis.SEUlist.qs"))
+
+if (!file.exists(out)) {
+  qsave(seu.list,file=out,nthreads=16)
+}
+```
+
+# 5 Save tables
+```{r}
+emb %>% write_csv(here("output","Fig6B.csv"))
+
+# Figure 6D
+genes <- c("CHI3L1", "MMP9", "SPP1", "CCL2", "CCL3", "CXCL8")
+
+mat <- GetAssayData(pseudo_bulk, assay = "RNA", slot = "data")
+
+genes_ok <- intersect(genes, rownames(mat))
+stopifnot(length(genes_ok) > 0)
+
+df_expr <- as.data.frame(t(as.matrix(mat[genes_ok, , drop = FALSE]))) %>%
+  rownames_to_column("sampleID")
+
+meta_df <- pseudo_bulk@meta.data
+
+df <- df_expr %>%
+  left_join(meta_df, by = "sampleID") %>%
+  #filter(Condition3 != "C") %>%    # matches your plot function’s control removal :contentReference[oaicite:1]{index=1}
+  mutate(Treatment = factor(as.character(Condition3),
+                            levels = c("UT1","UT2","pre-ETI","ETI","C")))
+
+df
+
+df %>% write_csv(here("output","Fig6D.csv"))
+```

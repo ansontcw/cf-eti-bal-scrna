@@ -1,0 +1,1402 @@
+---
+title: 'BAL cytokine analysis (ETI)'
+author:
+- name: Anson Wong
+date: "`r Sys.Date()`"
+description: null
+output: html_document
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+xaringanExtra::use_panelset()
+
+```
+
+# 1 Load packages
+```{r}
+suppressPackageStartupMessages({
+library(Seurat)
+library(here)
+library(qs)
+library(forcats)
+library(pals)
+library(ggplot2)
+library(ggpubr)
+library(rstatix)
+library(patchwork)
+library(dplyr)
+library(readr)
+library(cowplot)
+library(ComplexHeatmap)
+library(circlize)
+library(RColorBrewer)
+library(grid) 
+library(tibble)
+library(purrr)
+library(ggrepel)
+library(scales)
+library(tidyr)
+library(ggrepel)
+library(scales)
+library(lubridate)
+library(sva)
+library(stringr)
+library(vctrs)
+library(limma)
+library(kableExtra)
+library(aod)
+})
+set.seed(1990)
+
+```
+
+# 2 Prepare 37-plex and 48-plex cytokine data
+
+## 2.1 Configuration and helpers
+
+```{r}
+plexes <- c("37" = "37-Plex_assay", "48" = "48-Plex_assay")
+base_data_dir <- "/group/canc2/anson/working/cf-eti-bal/data/cytokine/250806"
+
+clean_metadata <- function(x) {
+  x <- sub("\\s+$", "", x)
+  x <- gsub(" ", "_", x)
+  x <- gsub("[[:punct:]&&[^\\-]]", "", x)
+  x
+}
+clean_cytokine <- function(x) {
+  x <- gsub("\\s*\\(pg/mL\\)", "", x)
+  x <- gsub(" ", "", x)
+  x
+}
+format_batch_date <- function(d) {
+  fmt <- as.Date(d, "%Y-%m-%d")
+  ifelse(is.na(fmt), d, format(fmt, "%-d/%-m/%Y"))
+}
+```
+
+## 2.2 Processing function
+
+```{r}
+process_cytokine <- function(plex_size) {
+  data_dir <- file.path(base_data_dir, plexes[plex_size])
+  files    <- list.files(data_dir, "\\.csv$", full.names = TRUE)
+  if (length(files)==0) stop("No CSVs found in ", data_dir)
+
+  lst <- lapply(files, function(path) {
+    df <- read.csv(path, stringsAsFactors = FALSE, fileEncoding = "UTF-8", check.names = FALSE)
+    orig    <- names(df)
+    is_cyto <- grepl("pg/mL", orig, fixed = TRUE)
+    md      <- orig[!is_cyto]
+    cy      <- orig[ is_cyto]
+    new_md <- clean_metadata(md)
+    new_cy <- clean_cytokine(cy)
+    names(df) <- c(new_md, new_cy)
+    
+    # # For each cytokine column in this file, compute the minimal observed non-NA value.
+    # # If >50% of non-missing samples equal that minimal value (after rounding to 2 dp),
+    # # treat the entire column as below-detection for this run by setting it to NA.
+    # digits <- 2
+    # for (cn in new_cy) {
+    #   vals <- suppressWarnings(as.numeric(df[[cn]]))
+    #   non_na <- !is.na(vals)
+    #   n_non_na <- sum(non_na)
+    #   if (n_non_na == 0) next
+    # 
+    #   min_val <- min(vals[non_na], na.rm = TRUE)
+    #   # count how many non-NA values equal the minimal value after rounding to `digits`
+    #   cnt_min <- sum(round(vals[non_na], digits) == round(min_val, digits), na.rm = TRUE)
+    #   frac_min <- cnt_min / n_non_na
+    # 
+    #   # if >50% of samples equal the minimal (rounded) value, mark column as all NA for this file
+    #   if (frac_min > 0.5) {
+    #     df[[cn]] <- NA_real_
+    #   }
+    # }
+    # 
+    date_col  <- "Date_performed"
+    plate_col <- grep("^What_plate", names(df), value = TRUE)[1]
+    date_str  <- format_batch_date(df[[date_col]])
+    plate_str <- if (!is.na(plate_col)) as.character(df[[plate_col]]) else ""
+    df$Batch  <- ifelse(plate_str=="",
+                        date_str,
+                        paste0(date_str, "_p", plate_str))
+    first_cyto <- new_cy[1]
+    df <- df %>% relocate(Batch, .before = all_of(first_cyto))
+    list(df = df, cytokines = new_cy)
+  })
+
+  all_cyto <- unique(unlist(lapply(lst, "[[", "cytokines")))
+  merged   <- do.call(rbind, lapply(lst, "[[", "df"))
+
+  keep_cyto <- sapply(all_cyto, function(cn) {
+    non_na_by_batch <- tapply(!is.na(merged[[cn]]), merged$Batch, any)
+    all(non_na_by_batch)
+  })
+  to_remove <- setdiff(all_cyto, names(keep_cyto)[keep_cyto])
+  raw_backup <- merged[, setdiff(names(merged), to_remove)]
+
+  # edit metadata (infection, condition, etc)
+  raw <- raw_backup
+  raw$Infection_bacteria <- ifelse(!is.na(raw$Bacteria) & raw$Bacteria!="", "Yes", "No")
+  raw$Infection_virus    <- ifelse(!is.na(raw$Virus)    & raw$Virus!="",    "Yes", "No")
+  raw$Infection_fungi    <- ifelse(!is.na(raw$Fungi)    & raw$Fungi!="",    "Yes", "No")
+  raw <- raw %>%
+    relocate(Infection_bacteria, .before="Bacteria") %>%
+    relocate(Infection_virus,    .before="Virus")    %>%
+    relocate(Infection_fungi,    .before="Fungi") %>%
+    mutate(
+      CF_Severity = ifelse(!is.na(CF_Severity) & CF_Severity!="",
+                           paste0("CF_", CF_Severity), NA_character_),
+      Condition   = coalesce(CF_Severity, Control_Subgroup),
+      Condition   = gsub(" ", "_", Condition)
+    ) %>%
+    relocate(Condition, .before=CF_Severity) %>%
+    mutate(
+      Condition1 = case_when(
+        grepl("^CF_mild$",   Condition, ignore.case=TRUE) ~ "CFN",
+        grepl("^CF_severe$", Condition, ignore.case=TRUE)       ~ "CFB",
+        TRUE                                              ~ "non-CF"
+      ),
+      Condition2 = case_when(
+        grepl('eAIR',      Record_ID, ignore.case=TRUE)  ~ "C",
+        grepl("true",      Condition, ignore.case=TRUE) ~ "C",
+        grepl("CF_mild",   Condition, ignore.case=TRUE) ~ "CFN",
+        grepl("CF_severe", Condition, ignore.case=TRUE) ~ "CFB",
+        grepl("CSLD",      Condition, ignore.case=TRUE) &
+        grepl("wheeze",    Condition, ignore.case=TRUE) ~ "CSLD_wheeze",
+        grepl("CSLD",      Condition, ignore.case=TRUE) ~ "CSLD",
+        grepl("wheeze",    Condition, ignore.case=TRUE) ~ "Wheeze",
+        grepl("oncology",  Condition, ignore.case=TRUE) ~ "Oncology",
+        grepl("BMT",       Condition, ignore.case=TRUE) ~ "BMT",
+        TRUE                                               ~ sub("_$", "", Condition)
+      )
+    ) %>%
+    relocate(Condition1, Condition2, .after=Condition) %>%
+    mutate(
+    #CF_Severity  = ifelse(is.na(CF_Severity)  | CF_Severity  == "", "NaN", CF_Severity),
+    CF_treatment = ifelse(is.na(CF_treatment) | CF_treatment == "", "NaN", CF_treatment)
+  )
+
+  # PCA & ComBat
+  metadata_vars <- c("Record_ID","Batch","Age","Sex",
+                     "Condition1","Condition2","CF_treatment",
+                     "Infection_bacteria","Infection_virus","Infection_fungi")
+
+  cyto_vars <- intersect(all_cyto, colnames(raw))
+  expr_mat  <- as.matrix(raw[, cyto_vars])
+  expr_log  <- log2(expr_mat)
+
+  run_pca_and_tests <- function(mat, meta, pcs=1:10) {
+    pca    <- prcomp(mat, center=TRUE, scale.=TRUE)
+    scores <- as.data.frame(pca$x[,pcs,drop=FALSE])
+    scores_meta <- bind_cols(scores, meta)
+    vars_to_test <- setdiff(names(meta), "Record_ID")
+    pvals <- sapply(vars_to_test, function(var) {
+      sapply(paste0("PC", pcs), function(pc) {
+        summary(aov(as.formula(paste(pc,"~",var)), data=scores_meta))[[1]]["Pr(>F)"][1,]
+      })
+    }, simplify="matrix")
+    colnames(pvals) <- vars_to_test
+    rownames(pvals) <- paste0("PC", pcs)
+    list(pca=pca, scores=scores_meta, pvals=pvals)
+  }
+
+  pre_res <- run_pca_and_tests(expr_log, raw[metadata_vars])
+  mod     <- model.matrix(~ Age + Sex + Condition2 +
+                           Infection_bacteria + Infection_virus + Infection_fungi,
+                         data=raw)
+  combat_out   <- ComBat(dat = t(expr_log), batch=raw$Batch,
+                         mod=mod, par.prior=TRUE)
+  expr_combat  <- t(combat_out)
+  post_res     <- run_pca_and_tests(expr_combat, raw[metadata_vars])
+
+  list(
+    raw=raw, expr_log=expr_log, expr_combat=expr_combat,
+    pre_res=pre_res, post_res=post_res,
+    cyto_vars=cyto_vars
+  )
+}
+```
+
+## 2.3 Run both 37-plex and 48-plex
+
+```{r}
+results <- lapply(names(plexes), process_cytokine)
+names(results) <- names(plexes)
+
+raw37         <- results[["37"]]$raw
+expr_log37    <- results[["37"]]$expr_log
+expr_combat37 <- results[["37"]]$expr_combat
+
+raw48         <- results[["48"]]$raw
+expr_log48    <- results[["48"]]$expr_log
+expr_combat48 <- results[["48"]]$expr_combat
+```
+
+# 3 Plots for 37-plex and 48-plex
+
+## 3.1 PCA plots
+
+```{r fig.width=10, fig.height=8}
+for (sz in names(results)) {
+  res <- results[[sz]]
+  pre <- res$pre_res; post <- res$post_res; raw <- res$raw
+  batch_cols <- brewer.pal(length(unique(raw$Batch)), "Dark2")
+  condition1_cols <- setNames(c("#26547c","#ffd166","#ef476f"),
+                              c("non-CF","CFN","CFB"))
+  condition2_levels <- levels(factor(raw$Condition2))
+  fixed <- c("C","CFN","CFB")
+  others <- setdiff(condition2_levels, fixed)
+  other_cols <- brewer.pal(max(3, length(others)), name="Dark2")
+  condition2_cols <- c(
+    C = "#26547c",
+    CFN = "#ffd166",
+    CFB = "#ef476f",
+    setNames(other_cols, others)
+  )
+  plot_pca <- function(res, title, color_var, color_values) {
+    ggplot(res$scores, aes_string("PC1", "PC2", color = color_var)) +
+      geom_point(size = 2) +
+      scale_color_manual(name = color_var, values = color_values) +
+      labs(title = title, x = "PC1", y = "PC2") +
+      theme_classic()
+  }
+  p1 <- plot_pca(pre,  paste0("Pre-ComBat by Batch (", sz, "-plex)"),      "Batch",      batch_cols)
+  p2 <- plot_pca(post, paste0("Post-ComBat by Batch (", sz, "-plex)"),     "Batch",      batch_cols)
+  p3 <- plot_pca(pre,  paste0("Pre-ComBat by Condition1 (", sz, "-plex)"),"Condition1", condition1_cols)
+  p4 <- plot_pca(post, paste0("Post-ComBat by Condition1 (", sz, "-plex)"),"Condition1", condition1_cols)
+  print((p1 | p2) / (p3 | p4))
+}
+```
+
+## 3.2 PCA by Condition2
+
+```{r fig.width=14, fig.height=4}
+for (sz in names(results)) {
+  res <- results[[sz]]
+  pre <- res$pre_res; post <- res$post_res; raw <- res$raw
+  condition2_levels <- levels(factor(raw$Condition2))
+  fixed <- c("C","CFN","CFB")
+  others <- setdiff(condition2_levels, fixed)
+  other_cols <- brewer.pal(max(3, length(others)), name="Dark2")
+  condition2_cols <- c(
+    C = "#26547c",
+    CFN = "#ffd166",
+    CFB = "#ef476f",
+    setNames(other_cols, others)
+  )
+  plot_pca <- function(res, title, color_var, color_values) {
+    ggplot(res$scores, aes_string("PC1", "PC2", color = color_var)) +
+      geom_point(size = 2) +
+      scale_color_manual(name = color_var, values = color_values) +
+      labs(title = title, x = "PC1", y = "PC2") +
+      theme_classic()
+  }
+  p5 <- plot_pca(pre,  paste0("Pre-ComBat by Condition2 (", sz, "-plex)"), "Condition2", condition2_cols)
+  p6 <- plot_pca(post, paste0("Post-ComBat by Condition2 (", sz, "-plex)"), "Condition2", condition2_cols)
+  print(p5 | p6)
+}
+```
+
+## 3.3 RLE plots
+### 3.3.1 37-plex
+```{r fig.height=3, fig.width=6}
+sz <- "37"
+res <- results[[sz]]
+raw <- res$raw
+expr_log    <- res$expr_log
+expr_combat <- res$expr_combat
+
+# 1) Prepare your matrices
+mat1 <- t(expr_log)
+mat2 <- t(expr_combat)
+
+# 2) compute per-feature medians
+ref1 <- apply(mat1, 1, median)
+ref2 <- apply(mat2, 1, median)
+
+# 3) subtract to get RLE
+rle1 <- mat1 - ref1
+rle2 <- mat2 - ref2
+
+# 4) recompute palette for this raw$Batch
+batch_lvls <- sort(unique(raw$Batch))
+batch_cols <- setNames(brewer.pal(length(batch_lvls), "Dark2"), batch_lvls)
+
+# 5) Order samples by batch and map to colours
+ord        <- order(raw$Batch)
+rle1_ord   <- rle1[, ord]
+rle2_ord   <- rle2[, ord]
+col_vec    <- batch_cols[ raw$Batch[ord] ]
+
+# 6) side-by-side boxplots
+par(mfrow = c(1,2), mar = c(4,4,4,1))
+
+boxplot(rle1_ord,
+        outline = FALSE,
+        col     = col_vec,
+        border  = NA,
+        xaxt    = "n",
+        main    = "RLE before ComBat",
+        ylab    = "Deviation from median")
+
+boxplot(rle2_ord,
+        outline = FALSE,
+        col     = col_vec,
+        border  = NA,
+        xaxt    = "n",
+        main    = "RLE after ComBat",
+        ylab    = "Deviation from median")
+
+
+```
+
+### 3.3.2 48-plex
+```{r fig.height=3, fig.width=6}
+sz <- "48"
+res <- results[[sz]]
+raw <- res$raw
+expr_log    <- res$expr_log
+expr_combat <- res$expr_combat
+
+# 1) Prepare your matrices
+mat1 <- t(expr_log)
+mat2 <- t(expr_combat)
+
+# 2) compute per-feature medians
+ref1 <- apply(mat1, 1, median)
+ref2 <- apply(mat2, 1, median)
+
+# 3) subtract to get RLE
+rle1 <- mat1 - ref1
+rle2 <- mat2 - ref2
+
+# 4) recompute palette for this raw$Batch
+batch_lvls <- sort(unique(raw$Batch))
+batch_cols <- setNames(brewer.pal(length(batch_lvls), "Dark2"), batch_lvls)
+
+# 5) Order samples by batch and map to colours
+ord        <- order(raw$Batch)
+rle1_ord   <- rle1[, ord]
+rle2_ord   <- rle2[, ord]
+col_vec    <- batch_cols[ raw$Batch[ord] ]
+
+# 6) side-by-side boxplots
+par(mfrow = c(1,2), mar = c(4,4,4,1))
+
+boxplot(rle1_ord,
+        outline = FALSE,
+        col     = col_vec,
+        border  = NA,
+        xaxt    = "n",
+        main    = "RLE before ComBat",
+        ylab    = "Deviation from median")
+
+boxplot(rle2_ord,
+        outline = FALSE,
+        col     = col_vec,
+        border  = NA,
+        xaxt    = "n",
+        main    = "RLE after ComBat",
+        ylab    = "Deviation from median")
+
+
+```
+
+
+## 3.4 37-plex: Deviation from median and Log2 Concentration
+
+```{r fig.width=9, fig.height=12.5}
+library(patchwork)
+sz <- "37"
+res <- results[[sz]]
+raw <- res$raw
+expr_log <- res$expr_log
+expr_combat <- res$expr_combat
+cyto_vars <- res$cyto_vars
+
+# Deviation from median
+df_pre <- raw %>%
+  select(Record_ID, Batch) %>%
+  bind_cols(as.data.frame(expr_log)) %>%
+  pivot_longer(cols = all_of(cyto_vars), names_to = "Cytokine", values_to = "Expression") %>%
+  mutate(ComBat = "pre")
+df_post <- raw %>%
+  select(Record_ID, Batch) %>%
+  bind_cols(as.data.frame(expr_combat)) %>%
+  pivot_longer(cols = all_of(cyto_vars), names_to = "Cytokine", values_to = "Expression") %>%
+  mutate(ComBat = "post")
+df_all <- bind_rows(df_pre, df_post)
+cyto_median <- df_all %>%
+  group_by(Cytokine) %>% summarize(MedianAll = median(Expression, na.rm=TRUE), .groups="drop")
+df_dev <- df_all %>%
+  left_join(cyto_median, by="Cytokine") %>%
+  mutate(Deviation = Expression - MedianAll,
+         ComBat = factor(ComBat, levels=c("pre","post")),
+         group = interaction(ComBat, Batch, drop=TRUE))
+batch_lvls <- sort(unique(df_dev$Batch))
+batch_cols <- brewer.pal(length(batch_lvls), name="Dark2"); names(batch_cols) <- batch_lvls
+p_dev <- ggplot(df_dev, aes(x=ComBat, y=Deviation, fill=ComBat, group=group)) +
+  geom_boxplot(aes(color=Batch), position=position_dodge(width=0.75),
+               alpha=0.6, outlier.size=0.5) +
+  scale_fill_manual(name="ComBat step", values=c("pre"="black","post"="white")) +
+  scale_color_manual(name="Batch", values=batch_cols) +
+  facet_wrap(~ Cytokine, scales="free_y", ncol=3) +
+  labs(
+    title    = "37-plex: Per‐cytokine deviation from overall median by Batch",
+    subtitle = "Left = pre-ComBat, Right = post-ComBat",
+    x        = "ComBat step",
+    y        = "Expression − median(Expression)"
+  ) +
+  theme_bw(base_size=12) +
+  theme(
+    strip.text      = element_text(size=8),
+    axis.text.x     = element_text(angle=45, hjust=1),
+    legend.position = "bottom"
+  )
+
+# Log2 concentration
+df_all2 <- bind_rows(df_pre, df_post) %>%
+  mutate(ComBat = factor(ComBat, levels=c("pre","post")),
+         group = interaction(ComBat, Batch, drop=TRUE))
+batch_lvls2 <- sort(unique(df_all2$Batch))
+batch_cols2 <- brewer.pal(length(batch_lvls2), name="Dark2"); names(batch_cols2) <- batch_lvls2
+p_log2 <- ggplot(df_all2, aes(x=ComBat, y=Expression, fill=ComBat, group=group)) +
+  geom_boxplot(position=position_dodge(width=0.75),
+               alpha=0.6, outlier.size=0.5) +
+  geom_jitter(aes(color=Batch),
+              position=position_jitterdodge(jitter.width=0.2, dodge.width=0.75),
+              size=1.2, alpha=0.8) +
+  scale_fill_manual(name="ComBat step", values=c("pre"="grey80", "post"="white")) +
+  scale_color_manual(name="Batch", values=batch_cols2) +
+  facet_wrap(~ Cytokine, scales="free_y", ncol=3) +
+  labs(
+    title    = "37-plex: Log2‐concentration distributions of each cytokine, pre‐ vs post‐ComBat",
+    subtitle = "Grey = pre‐ComBat, white = post‐ComBat",
+    x        = "ComBat",
+    y        = "Log2 Concentration"
+  ) +
+  theme_bw(base_size=12) +
+  theme(
+    strip.text      = element_text(size=8),
+    axis.text.x     = element_text(angle=45, hjust=1),
+    legend.position = "bottom"
+  )
+
+# Display both plots vertically
+p_dev 
+p_log2
+```
+
+## 3.5 48-plex: Deviation from median and Log2 Concentration
+
+```{r fig.width=15, fig.height=15}
+library(patchwork)
+sz <- "48"
+res <- results[[sz]]
+raw <- res$raw
+expr_log <- res$expr_log
+expr_combat <- res$expr_combat
+cyto_vars <- res$cyto_vars
+
+# Deviation from median
+df_pre <- raw %>%
+  select(Record_ID, Batch) %>%
+  bind_cols(as.data.frame(expr_log)) %>%
+  pivot_longer(cols = all_of(cyto_vars), names_to = "Cytokine", values_to = "Expression") %>%
+  mutate(ComBat = "pre")
+df_post <- raw %>%
+  select(Record_ID, Batch) %>%
+  bind_cols(as.data.frame(expr_combat)) %>%
+  pivot_longer(cols = all_of(cyto_vars), names_to = "Cytokine", values_to = "Expression") %>%
+  mutate(ComBat = "post")
+df_all <- bind_rows(df_pre, df_post)
+cyto_median <- df_all %>%
+  group_by(Cytokine) %>% summarize(MedianAll = median(Expression, na.rm=TRUE), .groups="drop")
+df_dev <- df_all %>%
+  left_join(cyto_median, by="Cytokine") %>%
+  mutate(Deviation = Expression - MedianAll,
+         ComBat = factor(ComBat, levels=c("pre","post")),
+         group = interaction(ComBat, Batch, drop=TRUE))
+batch_lvls <- sort(unique(df_dev$Batch))
+batch_cols <- brewer.pal(length(batch_lvls), name="Dark2"); names(batch_cols) <- batch_lvls
+p_dev <- ggplot(df_dev, aes(x=ComBat, y=Deviation, fill=ComBat, group=group)) +
+  geom_boxplot(aes(color=Batch), position=position_dodge(width=0.75),
+               alpha=0.6, outlier.size=0.5) +
+  scale_fill_manual(name="ComBat step", values=c("pre"="black","post"="white")) +
+  scale_color_manual(name="Batch", values=batch_cols) +
+  facet_wrap(~ Cytokine, scales="free_y", ncol=6) +
+  labs(
+    title    = "48-plex: Per‐cytokine deviation from overall median by Batch",
+    subtitle = "Left = pre-ComBat, Right = post-ComBat",
+    x        = "ComBat step",
+    y        = "Expression − median(Expression)"
+  ) +
+  theme_bw(base_size=12) +
+  theme(
+    strip.text      = element_text(size=8),
+    axis.text.x     = element_text(angle=45, hjust=1),
+    legend.position = "bottom"
+  )
+
+# Log2 concentration
+df_all2 <- bind_rows(df_pre, df_post) %>%
+  mutate(ComBat = factor(ComBat, levels=c("pre","post")),
+         group = interaction(ComBat, Batch, drop=TRUE))
+batch_lvls2 <- sort(unique(df_all2$Batch))
+batch_cols2 <- brewer.pal(length(batch_lvls2), name="Dark2"); names(batch_cols2) <- batch_lvls2
+p_log2 <- ggplot(df_all2, aes(x=ComBat, y=Expression, fill=ComBat, group=group)) +
+  geom_boxplot(position=position_dodge(width=0.75),
+               alpha=0.6, outlier.size=0.5) +
+  geom_jitter(aes(color=Batch),
+              position=position_jitterdodge(jitter.width=0.2, dodge.width=0.75),
+              size=1.2, alpha=0.8) +
+  scale_fill_manual(name="ComBat step", values=c("pre"="grey80", "post"="white")) +
+  scale_color_manual(name="Batch", values=batch_cols2) +
+  facet_wrap(~ Cytokine, scales="free_y", ncol=6) +
+  labs(
+    title    = "48-plex: Log2‐concentration distributions of each cytokine, pre‐ vs post‐ComBat",
+    subtitle = "Grey = pre‐ComBat, white = post‐ComBat",
+    x        = "ComBat",
+    y        = "Log2 Concentration"
+  ) +
+  theme_bw(base_size=12) +
+  theme(
+    strip.text      = element_text(size=8),
+    axis.text.x     = element_text(angle=45, hjust=1),
+    legend.position = "bottom"
+  )
+
+# Display both plots vertically
+p_dev
+p_log2
+```
+
+## 3.6 Heatmap of p-values
+
+```{r fig.width=10, fig.height=5}
+for (sz in names(results)) {
+  res    <- results[[sz]]
+  pre    <- res$pre_res; post <- res$post_res
+  t_pre  <- paste0("Pre-ComBat: metadata vs PCs (", sz, "-plex)")
+  t_post <- paste0("Post-ComBat: metadata vs PCs (", sz, "-plex)")
+  brpal <- brewer.pal(5, "RdBu")
+  col_fun <- colorRamp2(c(0,0.01,0.05,0.2,1), brpal)
+  fmt_sci2 <- function(x) sprintf("%.2e", x)
+  ht_pre <- Heatmap(pre$pvals, name="p-value", col=col_fun,
+                    cluster_rows=FALSE, cluster_columns=FALSE,
+                    column_title=t_pre, row_title="PCs",
+                    cell_fun=function(j,i,x,y,w,h,fill) {
+                      grid.rect(x,y,w*0.9,h*0.9, gp=gpar(fill=fill,col=NA))
+                      grid.text(fmt_sci2(pre$pvals[i,j]), x,y,
+                                gp=gpar(fontsize=7))
+                    })
+  ht_post <- Heatmap(post$pvals, name="p-value", col=col_fun,
+                     cluster_rows=FALSE, cluster_columns=FALSE,
+                     column_title=t_post, row_title="PCs",
+                     cell_fun=function(j,i,x,y,w,h,fill) {
+                       grid.rect(x,y,w*0.9,h*0.9, gp=gpar(fill=fill,col=NA))
+                       grid.text(fmt_sci2(post$pvals[i,j]), x,y,
+                                 gp=gpar(fontsize=7))
+                     })
+  draw(ht_pre + ht_post, heatmap_legend_side="right")
+}
+```
+
+
+
+# 4 Analysis
+```{r}
+res.final <- qread(here("data","cytokine","res_ETI.master.qs"))
+```
+
+## 4.1 Subset CF and true controls
+```{r}
+res37 <- results[["37"]]
+res48 <- results[["48"]]
+
+# 1) Shared IDs & allowed conditions
+common_ids  <- intersect(res37$raw$Record_ID, res48$raw$Record_ID)
+keep_conds  <- c("CFB","CFN","C")
+#keep_treatment <- c("None","NaN")
+```
+
+## 4.2 Remove overlapping cytokines
+```{r}
+# 2) Cytokines in both → drop from res37 only
+common_cyto <- intersect(res37$cyto_vars, res48$cyto_vars)
+
+# 3) One‐liner helper
+filter_cyto_df <- function(res, drop_overlap=FALSE) {
+  # a) filter rows
+  raw_f <- res$raw %>%
+    filter(Record_ID %in% common_ids,
+           Condition2 %in% keep_conds,
+           #CF_treatment %in% keep_treatment,
+           Age < 8)
+
+  # b) pick which cyto to keep
+  cyto_f <- if (drop_overlap) setdiff(res$cyto_vars, common_cyto) else res$cyto_vars
+  # c) meta = all non‐cytokine cols
+  meta_vars <- setdiff(names(raw_f), res$cyto_vars)
+  meta_f    <- raw_f %>% select(all_of(meta_vars))
+  # d) get original row‐indices for subsetting expr_mats
+  idx <- match(raw_f$Record_ID, res$raw$Record_ID)
+  expr_log_f    <- if (!is.null(res$expr_log))    res$expr_log[idx, cyto_f, drop=FALSE]
+  expr_combat_f <- if (!is.null(res$expr_combat)) res$expr_combat[idx, cyto_f, drop=FALSE]
+  # e) return
+  list(
+    raw         = raw_f,
+    meta        = meta_f,
+    cyto_vars   = cyto_f,
+    expr_log    = expr_log_f,
+    expr_combat = expr_combat_f
+  )
+}
+
+# 4) Build two filtered objects
+res37.filter <- filter_cyto_df(res37, drop_overlap=TRUE)
+res48.filter <- filter_cyto_df(res48, drop_overlap=FALSE)
+```
+
+## 4.3 Cross-check metadata columns
+```{r}
+# 1. figure out which meta‐columns to compare
+ignore_patterns <- "^Batch$|^Date_performed$|^What_plate|^Complete\\?$|^Analysis_performed$"
+common_meta   <- intersect(names(res37.filter$meta), names(res48.filter$meta))
+compare_cols  <- setdiff(common_meta, grep(ignore_patterns, common_meta, value = TRUE))
+
+# 2. pull the joined table with suffixes
+cmp <- inner_join(
+  res37.filter$meta %>% select(Record_ID, all_of(compare_cols)),
+  res48.filter$meta %>% select(Record_ID, all_of(compare_cols)),
+  by = "Record_ID",
+  suffix = c(".37", ".48")
+)
+
+# 3. for each column, find mismatches
+mismatches <- map_dfr(compare_cols, function(col) {
+  col37 <- paste0(col, ".37")
+  col48 <- paste0(col, ".48")
+  diffs <- which(cmp[[col37]] != cmp[[col48]])
+  if (length(diffs)==0) return(NULL)
+  tibble(
+    Record_ID = cmp$Record_ID[diffs],
+    column    = col,
+    val.37    = cmp[[col37]][diffs],
+    val.48    = cmp[[col48]][diffs]
+  )
+})
+
+# 4. report
+if (nrow(mismatches)==0) {
+  message("All compared meta‐columns match exactly!")
+} else {
+  message("Found mismatches:")
+  print(mismatches)
+}
+
+```
+
+## 4.4 Merge data
+```{r}
+# 2) Desired metadata columns
+keep_meta <- c(
+  "Record_ID","Age","Sex",
+  "Condition","Condition1","Condition2","CF_Severity","CF_treatment",
+  "Collection_date","Control_Subgroup",
+  "Infection_bacteria","Bacteria",
+  "Infection_virus","Virus",
+  "Infection_fungi","Fungi",
+  "Batch"
+)
+
+# 1) put Record_ID on the rownames of each raw‐matrix
+rownames(res37.filter$raw) <- res37.filter$meta$Record_ID
+rownames(res48.filter$raw) <- res48.filter$meta$Record_ID
+
+# 2) pick off just the analyte columns (drop the meta ones)
+analytes37 <- res37.filter$cyto_vars
+analytes48 <- res48.filter$cyto_vars
+
+# 3) find the samples in common
+common <- intersect(
+  rownames(res37.filter$raw),
+  rownames(res48.filter$raw)
+)
+
+# 4) cbind only the analyte cols for those common samples
+res.final.raw <- cbind(
+  res37.filter$raw[common, analytes37, drop=FALSE],
+  res48.filter$raw[common, analytes48, drop=FALSE]
+)
+
+# 5) rebuild meta frame to the same order
+res.final.meta <- res37.filter$meta[ match(common, res37.filter$meta$Record_ID), keep_meta, drop = FALSE ]
+
+# 4) Record_ID rownames on each expr matrix
+rownames(res37.filter$expr_log)    <- res37.filter$meta$Record_ID
+rownames(res48.filter$expr_log)    <- res48.filter$meta$Record_ID
+rownames(res37.filter$expr_combat) <- res37.filter$meta$Record_ID
+rownames(res48.filter$expr_combat) <- res48.filter$meta$Record_ID
+
+# 5) Find the common 136 samples (same order for both plexes)
+common <- intersect(
+  rownames(res37.filter$expr_log),
+  rownames(res48.filter$expr_log)
+)
+
+# 6) Subset & cbind the log and ComBat matrices
+res.final.expr_log <- cbind(
+  res37.filter$expr_log[common, , drop=FALSE],
+  res48.filter$expr_log[common, , drop=FALSE]
+)
+
+res.final.expr_combat <- cbind(
+  res37.filter$expr_combat[common, , drop=FALSE],
+  res48.filter$expr_combat[common, , drop=FALSE]
+)
+
+# 8) Recompute cytokine list
+res.final.cyto_vars <- colnames(res.final.expr_combat)
+
+# 9) Final sanity‐checks
+dim(res.final.raw)    # 136 × 62
+dim(res.final.expr_log)    # 136 × 49
+dim(res.final.expr_combat) # 136 × 49
+dim(res.final.meta)        # 136 × 16
+
+# 10) Assemble final list
+res.final <- list(
+  raw         = res.final.raw,
+  meta        = res.final.meta,
+  cyto_vars   = res.final.cyto_vars,
+  expr_log    = res.final.expr_log,
+  expr_combat = res.final.expr_combat
+)
+
+# ensure character
+res.final$meta$Record_ID <- as.character(res.final$meta$Record_ID)
+
+# create Subject_ID (first 6 chars if Record_ID starts with "M", else whole Record_ID)
+res.final$meta$Subject_ID <- ifelse(startsWith(res.final$meta$Record_ID, "M"),
+                                    substr(res.final$meta$Record_ID, 1, 6),
+                                    res.final$meta$Record_ID)
+
+# move Subject_ID immediately after Record_ID
+res.final$meta <- res.final$meta[, c("Record_ID", "Subject_ID", setdiff(names(res.final$meta), c("Record_ID", "Subject_ID")))]
+
+# Inspect
+#str(res.final)
+
+# backup object
+res.final.backup <- res.final
+
+```
+
+## 4.5 Filter ETI-related samples
+```{r}
+records <- c("M1C160(1)","M1C160F", # CF-S1, treated
+            "M1C177","M1C177C", # CF-M3, treated
+            "M1C188","M1C188B", # CF-S3, treated
+            "M1C170C","M1C170D", # CF-M1, untreated
+            "M1C176", "M1C176C", # CF-M2
+            "M1C180","M1C180D", # CF-M4
+            "M1N066","M1N075","M1N078","M1N080","M1N087","M1N092" #HC1-6
+            )
+if (!exists("res.final.backup")) stop("res.final.backup not found in the environment")
+
+# preserve the order given in `records`, but only keep those that actually exist
+available_ids <- rownames(res.final.backup$raw)
+ordered_found <- records[records %in% available_ids]
+
+if (length(ordered_found) == 0) stop("None of the requested record IDs were found in res.final.backup$raw")
+
+missing_ids <- setdiff(records, ordered_found)
+if (length(missing_ids) > 0) warning("Some requested Record_IDs were not found and will be skipped: ",
+                                    paste(missing_ids, collapse = ", "))
+
+# build res.final by subsetting known components; be tolerant if some components missing
+res.final <- list()
+
+if ("raw" %in% names(res.final.backup)) {
+  res.final$raw <- res.final.backup$raw[ordered_found, , drop = FALSE]
+  # keep rownames as Record_ID
+}
+
+if ("meta" %in% names(res.final.backup)) {
+  # meta is a data.frame with Record_ID column
+  md <- res.final.backup$meta
+  # subset and preserve order
+  res.final$meta <- md[match(ordered_found, md$Record_ID), , drop = FALSE]
+  # ensure Record_ID is character
+  if ("Record_ID" %in% names(res.final$meta)) res.final$meta$Record_ID <- as.character(res.final$meta$Record_ID)
+}
+
+if ("cyto_vars" %in% names(res.final.backup)) {
+  res.final$cyto_vars <- res.final.backup$cyto_vars
+}
+
+if ("expr_log" %in% names(res.final.backup)) {
+  # expr_log rows should be Record_ID rownames
+  res.final$expr_log <- res.final.backup$expr_log[ordered_found, , drop = FALSE]
+}
+
+if ("expr_combat" %in% names(res.final.backup)) {
+  res.final$expr_combat <- res.final.backup$expr_combat[ordered_found, , drop = FALSE]
+}
+
+# simple sanity checks
+message("Constructed res.final with ", nrow(res.final$meta), " samples (rows).")
+if (!is.null(res.final$raw))  message("res.final$raw dims: ", paste(dim(res.final$raw), collapse = " x "))
+if (!is.null(res.final$expr_log)) message("res.final$expr_log dims: ", paste(dim(res.final$expr_log), collapse = " x "))
+if (!is.null(res.final$expr_combat)) message("res.final$expr_combat dims: ", paste(dim(res.final$expr_combat), collapse = " x "))
+
+# add_treatment_to_res_final_meta.R
+pre_ids <- c("M1C160(1)", "M1C177", "M1C188")
+ut1_ids <- c("M1C170C", "M1C176", "M1C180")
+ut2_ids <- c("M1C170D", "M1C176C", "M1C180D")
+
+res.final$meta <- res.final$meta %>%
+  dplyr::mutate(
+    treatment = dplyr::case_when(
+      CF_treatment == "Trikafta"              ~ "ETI",
+      CF_treatment == "NaN"                   ~ "C",
+      CF_treatment == "None" & Record_ID %in% pre_ids  ~ "pre-ETI",
+      CF_treatment == "None" & Record_ID %in% ut1_ids ~ "UT1",
+      CF_treatment == "None" & Record_ID %in% ut2_ids ~ "UT2",
+      TRUE                                    ~ NA_character_
+    )) %>%
+  dplyr::mutate(
+    treatment_group = dplyr::case_when(
+      treatment %in% c("pre-ETI", "ETI") ~ "ETI",
+      treatment %in% c("UT1", "UT2")     ~ "UT",
+      treatment == "C"                   ~ "C"
+    )
+  )
+
+# sanity check
+table(res.final$meta$treatment, useNA = "ifany")
+# sanity check
+table(res.final$meta$treatment_group, useNA = "ifany")
+
+# save object
+qsave(res.final, file=here("data","cytokine","res_ETI.master.qs"))
+```
+
+## 4.6 PCA
+### 4.6.1 fibro cytokines
+```{r fig.height=4, fig.width=9}
+# 1) define your fibro‐related cytokines
+fibro.cytokines <- c(
+  "BAFF/TNFSF13B", "sCD30/TNFRSF8", "sCD163", "Chitinase-3-like1",
+  "gp130/sIL-6Rβ", "sIL-6Rα", "Osteopontin", "Pentraxin-3", "TSLP",
+  "TWEAK/TNFSF12", "FGFbasic", "Eotaxin", "IL-1β", "IL-5",
+  "IL-8", "IL-13", "MCP-1(MCAF)", "SDF-1α", "PDGF-BB","M-CSF"
+)
+
+# 2) subset the ComBat‐corrected data
+expr_fibro <- res.final$expr_combat[, fibro.cytokines, drop = FALSE]
+
+# 1) PCA on the merged ComBat‐corrected matrix
+#    rows = samples, cols = cytokines
+pca_final <- prcomp(expr_fibro, center = TRUE, scale. = TRUE)
+# Percentage variance explained
+var_exp <- summary(pca_final)$importance[2, 1:2] * 100
+
+# 2) turn scores into a data.frame and join metadata
+scores_final <- as.data.frame(pca_final$x[, 1:10], check.names = FALSE)
+scores_final <- bind_cols(scores_final, res.final$meta)
+
+# define stroke (border) colours and fill colours per treatment
+stroke_cols <- c(
+  "pre-ETI" = "#3a5a40",
+  "ETI"     = "#3a5a40",
+  "UT1"     = "#936639",
+  "UT2"     = "#936639",
+  "C"       = "#26547c"
+)
+fill_cols <- c(
+  "pre-ETI" = "white",      # empty-looking (white interior) with coloured border
+  "ETI"     = "#3a5a40",    # filled with ETI colour
+  "UT1"     = "white",      # empty-looking
+  "UT2"     = "#936639",    # filled with UT2 colour
+  "C"       = "#26547c"     # control (cross) — fill ignored for non-fillable shape
+)
+
+# shapes: C = cross (4), T = upward triangle (24, fillable), UT = circle (21, fillable)
+shape_map <- c("C" = 4, "ETI" = 24, "UT" = 21)
+
+# ensure factors have the expected levels (optional, but keeps legend order predictable)
+scores_final$treatment_group <- factor(scores_final$treatment_group, levels = names(shape_map))
+scores_final$treatment <- factor(scores_final$treatment, levels = names(stroke_cols))
+
+# prepare small df of subjects with >1 sample (no date ordering)
+lines_df <- scores_final %>%
+  group_by(Subject_ID) %>%
+  filter(n() > 1) %>%
+  arrange(Subject_ID, PC1) %>%   # deterministic order; change to Collection_date if you later want date ordering
+  ungroup()
+
+# ensure Record_ID is a factor for consistent colour mapping
+scores_final$Record_ID <- as.factor(scores_final$Record_ID)
+
+# centroids_sample: label coordinates taken directly from scores_final
+centroids_sample <- scores_final %>%
+  transmute(x = PC1, y = PC2, sampleID = Record_ID)
+
+p_sample <- ggplot(scores_final, aes(x = PC1, y = PC2, color = Record_ID)) +
+  geom_point(size = 4) +
+  ggrepel::geom_text_repel(
+    data = centroids_sample,
+    aes(x = x, y = y, label = sampleID),
+    inherit.aes = FALSE,
+    size = 3.2,
+    box.padding = 0.3,
+    point.padding = 0.3,
+    segment.size = 0.3,
+    max.overlaps = Inf
+  ) +
+  scale_color_manual(values = setNames(rep("#666666", length(levels(scores_final$Record_ID))),
+                                      levels(scores_final$Record_ID))) +
+  labs(title = "Record_ID") +
+  NoLegend() +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text        = element_text(size = 12),
+    axis.title       = element_text(size = 14),
+    panel.border     = element_rect(color = "black", fill = NA, size = 0.7),
+    axis.line        = element_blank(),
+    legend.position  = "none",
+    plot.title       = element_text(hjust = 0.5)
+  )
+
+# plot
+ggplot(scores_final, aes(x = PC1, y = PC2,
+                         shape = treatment_group,
+                         color = treatment,
+                         fill = treatment)) +
+  # draw lines connecting longitudinal samples (behind points)
+  geom_line(data = lines_df,
+            aes(x = PC1, y = PC2, group = Subject_ID),
+            inherit.aes = FALSE,
+            color = "grey20",
+            linetype = "solid",
+            size = 0.7,
+            alpha = 0.8) +
+  # points on top
+  geom_point(size = 3.5, stroke = 0.9, alpha = 0.95) +
+  stat_ellipse(aes(group = treatment), type = "norm", level = 0.68,
+               geom = "polygon", alpha = 0.18, colour = NA, show.legend = FALSE) +
+  # rename shape legend to "Treatment"
+  scale_shape_manual(name = "Treatment", values = shape_map) +
+  # hide color & fill legends (only keep the shape legend)
+  scale_color_manual(values = stroke_cols, guide = "none") +
+  scale_fill_manual(values = fill_cols, guide = "none") +
+  # optionally tweak how the shape legend keys appear
+  guides(shape = guide_legend(override.aes = list(colour = "black", fill = NA, size = 4))) +
+  labs(
+    title = "Profibrotic cytokines",
+    x     = paste0("PC1 (", round(var_exp[1], 1), "%)"),
+    y     = paste0("PC2 (", round(var_exp[2], 1), "%)")
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text        = element_text(size = 12),
+    axis.title       = element_text(size = 14),
+    panel.border     = element_rect(color = "black", fill = NA, size = 0.7),
+    axis.line        = element_blank(),
+    legend.position  = "right",
+    legend.direction = "vertical",
+    plot.title       = element_text(hjust = 0.5)
+  ) -> p2
+p_sample | p2
+```
+
+### 4.6.2 all cytokines
+```{r fig.height=4, fig.width=9}
+# 1) PCA on the merged ComBat‐corrected matrix
+#    rows = samples, cols = cytokines
+pca_final <- prcomp(res.final$expr_combat, center = TRUE, scale. = TRUE)
+# Percentage variance explained
+var_exp <- summary(pca_final)$importance[2, 1:2] * 100
+
+# 2) turn scores into a data.frame and join metadata
+scores_final <- as.data.frame(pca_final$x[, 1:10], check.names = FALSE)
+scores_final <- bind_cols(scores_final, res.final$meta)
+
+# define stroke (border) colours and fill colours per treatment
+stroke_cols <- c(
+  "pre-ETI" = "#3a5a40",
+  "ETI"     = "#3a5a40",
+  "UT1"     = "#936639",
+  "UT2"     = "#936639",
+  "C"       = "#26547c"
+)
+fill_cols <- c(
+  "pre-ETI" = "white",      # empty-looking (white interior) with coloured border
+  "ETI"     = "#3a5a40",    # filled with ETI colour
+  "UT1"     = "white",      # empty-looking
+  "UT2"     = "#936639",    # filled with UT2 colour
+  "C"       = "#26547c"     # control (cross) — fill ignored for non-fillable shape
+)
+
+# shapes: C = cross (4), T = upward triangle (24, fillable), UT = circle (21, fillable)
+shape_map <- c("C" = 4, "ETI" = 24, "UT" = 21)
+
+# ensure factors have the expected levels (optional, but keeps legend order predictable)
+scores_final$treatment_group <- factor(scores_final$treatment_group, levels = names(shape_map))
+scores_final$treatment <- factor(scores_final$treatment, levels = names(stroke_cols))
+
+# prepare small df of subjects with >1 sample (no date ordering)
+lines_df <- scores_final %>%
+  group_by(Subject_ID) %>%
+  filter(n() > 1) %>%
+  arrange(Subject_ID, PC1) %>%   # deterministic order; change to Collection_date if you later want date ordering
+  ungroup()
+
+# ensure Record_ID is a factor for consistent colour mapping
+scores_final$Record_ID <- as.factor(scores_final$Record_ID)
+
+# centroids_sample: label coordinates taken directly from scores_final
+centroids_sample <- scores_final %>%
+  transmute(x = PC1, y = PC2, sampleID = Record_ID)
+
+p_sample <- ggplot(scores_final, aes(x = PC1, y = PC2, color = Record_ID)) +
+  geom_point(size = 4) +
+  ggrepel::geom_text_repel(
+    data = centroids_sample,
+    aes(x = x, y = y, label = sampleID),
+    inherit.aes = FALSE,
+    size = 3.2,
+    box.padding = 0.3,
+    point.padding = 0.3,
+    segment.size = 0.3,
+    max.overlaps = Inf
+  ) +
+  scale_color_manual(values = setNames(rep("#666666", length(levels(scores_final$Record_ID))),
+                                      levels(scores_final$Record_ID))) +
+  labs(title = "Record_ID") +
+  NoLegend() +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text        = element_text(size = 12),
+    axis.title       = element_text(size = 14),
+    panel.border     = element_rect(color = "black", fill = NA, size = 0.7),
+    axis.line        = element_blank(),
+    legend.position  = "none",
+    plot.title       = element_text(hjust = 0.5)
+  )
+
+# plot
+ggplot(scores_final, aes(x = PC1, y = PC2,
+                         shape = treatment_group,
+                         color = treatment,
+                         fill = treatment)) +
+  # draw lines connecting longitudinal samples (behind points)
+  geom_line(data = lines_df,
+            aes(x = PC1, y = PC2, group = Subject_ID),
+            inherit.aes = FALSE,
+            color = "grey20",
+            linetype = "solid",
+            size = 0.7,
+            alpha = 0.8) +
+  # points on top
+  geom_point(size = 3.5, stroke = 0.9, alpha = 0.95) +
+  stat_ellipse(aes(group = treatment), type = "norm", level = 0.68,
+               geom = "polygon", alpha = 0.18, colour = NA, show.legend = FALSE) +
+  # rename shape legend to "Treatment"
+  scale_shape_manual(name = "Treatment", values = shape_map) +
+  # hide color & fill legends (only keep the shape legend)
+  scale_color_manual(values = stroke_cols, guide = "none") +
+  scale_fill_manual(values = fill_cols, guide = "none") +
+  # optionally tweak how the shape legend keys appear
+  guides(shape = guide_legend(override.aes = list(colour = "black", fill = NA, size = 4))) +
+  labs(
+    title = "Profibrotic cytokines",
+    x     = paste0("PC1 (", round(var_exp[1], 1), "%)"),
+    y     = paste0("PC2 (", round(var_exp[2], 1), "%)")
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text        = element_text(size = 12),
+    axis.title       = element_text(size = 14),
+    panel.border     = element_rect(color = "black", fill = NA, size = 0.7),
+    axis.line        = element_blank(),
+    legend.position  = "right",
+    legend.direction = "vertical",
+    plot.title       = element_text(hjust = 0.5)
+  ) -> p2
+p_sample | p2
+```
+
+
+
+## 4.7 Cytokine concentration
+```{r fig.width=6, fig.height=3}
+# 0) quick checks
+stopifnot(exists("res.final"))
+stopifnot(is.data.frame(res.final$meta))
+stopifnot(is.matrix(res.final$expr_combat) || is.data.frame(res.final$expr_combat))
+
+# 1) build a long dataframe: Record_ID, Subject_ID, treatment, cytokine, Value
+expr_df <- as.data.frame(res.final$expr_combat) %>%
+  tibble::rownames_to_column("Record_ID")
+
+meta_df <- as.data.frame(res.final$meta) %>%
+  select(Record_ID, Subject_ID, treatment)
+
+df <- expr_df %>%
+  left_join(meta_df, by = "Record_ID")
+
+# 2) pivot to long; expr_combat is already log2-transformed (from your pipeline), so do not re-transform
+cytokines <- setdiff(names(df), c("Record_ID", "Subject_ID", "treatment"))
+
+df_long <- df %>%
+  pivot_longer(cols = all_of(cytokines),
+               names_to  = "Cytokine",
+               values_to = "Value") %>%
+  filter(treatment %in% c("pre-ETI", "ETI", "UT1", "UT2")) %>%
+  filter(!is.na(Value)) %>%
+  mutate(
+    Treatment = treatment,           # use a clearer column name for compatibility with previous code
+    Subject_ID = as.character(Subject_ID)
+  )
+
+# 3) Per-cytokine, per-subject counts of observations (we want paired samples)
+pair_counts <- df_long %>%
+  group_by(Cytokine, Subject_ID) %>%
+  summarise(n = n(), .groups = "drop")
+
+# 4) Keep cytokines where all subjects present in this subset have exactly 2 observations
+#    (i.e. both timepoints for their pairing)
+good_cytokines <- pair_counts %>%
+  group_by(Cytokine) %>%
+  summarise(all_paired = all(n == 2), .groups = "drop") %>%
+  filter(all_paired) %>%
+  pull(Cytokine)
+
+message("Kept ", length(good_cytokines), " cytokines with complete pairs across subjects.")
+
+df_long2 <- df_long %>%
+  filter(Cytokine %in% good_cytokines) %>%
+  # order factors so UT1 -> UT2 and pre-ETI -> ETI in the x-axis
+  mutate(Treatment = factor(Treatment, levels = c("UT1", "UT2", "pre-ETI", "ETI")),
+         PairPanel = ifelse(grepl("^UT", as.character(Treatment)), "UT", "ETI"))
+
+# 5) paired t-tests per cytokine for the two comparisons of interest
+comparisons <- list(
+  c("ETI",    "pre-ETI"),
+  c("UT2",    "UT1")
+)
+
+stat.tests <- df_long2 %>%
+  group_by(Cytokine) %>%
+  pairwise_t_test(
+    Value ~ Treatment,
+    paired           = TRUE,
+    paired.id        = "Subject_ID",
+    comparisons      = comparisons,
+    p.adjust.method  = "BH"
+  ) %>%
+  ungroup()
+
+# 6) select significant results (BH-adjusted p < 0.05)
+sig_tests <- stat.tests %>% filter(p.adj < 0.05)
+sig_cytokines <- unique(sig_tests$Cytokine)
+message("Significant cytokines (FDR < 0.05): ", paste(sig_cytokines, collapse = ", "))
+
+# 7) subset data to only the significant cytokines (or a chosen set)
+if (length(sig_cytokines) == 0) {
+  warning("No significant cytokines found. Plotting top 6 by smallest p.adj instead.")
+  top_cytos <- stat.tests %>% arrange(p.adj) %>% pull(Cytokine) %>% unique() %>% head(6)
+  plot_cytokines <- top_cytos
+} else {
+  plot_cytokines <- sig_cytokines
+}
+
+df_sig <- df_long2 %>% filter(Cytokine %in% plot_cytokines)
+df_sig$Cytokine <- factor(df_sig$Cytokine, levels = plot_cytokines)
+
+# 8) prepare stat.test for plotting (filter to those cytokines and non-NA p)
+plot_stat <- stat.tests %>%
+  filter(Cytokine %in% plot_cytokines) %>%
+  filter(!is.na(p.adj))
+
+# 9) compute y positions (per-cytokine) to draw brackets above the data
+lims <- df_sig %>%
+  group_by(Cytokine) %>%
+  summarise(
+    y_max = max(Value, na.rm = TRUE),
+    y_min = min(Value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+plot_stat <- plot_stat %>%
+  left_join(lims, by = "Cytokine") %>%
+  group_by(Cytokine) %>%
+  arrange(p.adj) %>%   # smaller p on top (optional)
+  mutate(
+    y.position = y_max + (row_number() - 1) * (y_max - y_min) * 0.15
+  ) %>%
+  ungroup()
+
+# 10) plotting palette for treatments (reuse your border colours)
+treatment_pal <- c("pre-ETI" = "#3a5a40", "ETI" = "#3a5a40", "UT1" = "#936639", "UT2" = "#936639")
+
+p <- ggplot(df_sig, aes(x = Treatment, y = Value)) +
+
+  # draw lines at the *true* x positions (as numeric), so they connect in the intended order
+  geom_line(
+    data = df_sig,
+    aes(x = as.numeric(Treatment), y = Value, group = interaction(Subject_ID, PairPanel)),
+    inherit.aes = FALSE,linetype="solid",
+    color = "grey70", size = 0.5
+  ) +
+
+  # draw jittered points on top (so overlapping points become visible)
+  geom_point(
+    aes(color = Treatment),
+    position = position_jitterdodge(jitter.width = 0.5),
+    size = 2, alpha = 0.95
+  ) +
+  # allow brackets/annotations outside panel
+  { if (nrow(plot_stat) > 0) stat_pvalue_manual(plot_stat,
+                                               label = "p.adj.signif",
+                                               tip.length = 0.02,bracket.nudge.y = 1,
+                                               bracket.size = 0.4,
+                                               hide.ns = TRUE)
+    else NULL } +
+  theme_classic(base_size = 12) +
+  theme(
+    strip.text       = element_text(size = 8),
+    axis.title.x     = element_blank(),
+    axis.text.x      = element_text(angle = 45, hjust = 1),
+    panel.border     = element_rect(color = "black", fill = NA, size = 0.5),
+    strip.background = element_rect(color = "black", fill = "white", size = 0.5),
+    axis.line.x      = element_blank(),
+    axis.line.y      = element_blank(),
+    legend.position  = "right"
+  ) +
+
+  # restore axis ticks/labels from numeric x used by lines
+  scale_x_continuous(breaks = 1:4, labels = c("UT1","UT2","pre-ETI","ETI")) +
+  scale_color_manual(values = treatment_pal) +
+  facet_wrap(~ Cytokine, scales = "free_y", ncol = 3) +
+  scale_x_discrete(limits = c("UT1", "UT2", "pre-ETI", "ETI")) +
+  scale_color_manual(values = treatment_pal) +
+  scale_y_continuous(expand = expansion(mult = c(0.12, 0.35))) +
+  coord_cartesian(clip = "off") +   # keep brackets/points visible
+  theme_classic(base_size = 12) +
+  theme(
+    strip.text = element_text(size = 8),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.border = element_rect(color = "black", fill = NA, size = 0.5),
+    strip.background = element_rect(color = "black", fill = "white", size = 0.5)
+  ) +
+  labs(y = "Concentration (log2 pg/mL)", color = "Treatment")
+
+print(p)
+
+```
+
+# 5 Save raw data
+```{r}
+write_two_tables_minimal <- function(res.final, file = "res_final_both.xlsx") {
+  raw <- as.data.frame(res.final$raw, stringsAsFactors = FALSE)
+  expr <- as.data.frame(res.final$expr_combat, stringsAsFactors = FALSE)
+  meta <- as.data.frame(res.final$meta, stringsAsFactors = FALSE)
+
+  ids <- rownames(raw)
+  cond2_map <- setNames(as.character(meta$Condition2), as.character(meta$Record_ID))
+  cond2_col <- cond2_map[ids]
+
+  expr <- expr[ids, , drop = FALSE]
+
+  left_tbl <- cbind(Record_ID = ids, Condition2 = cond2_col, raw, stringsAsFactors = FALSE)
+  rownames(left_tbl) <- NULL
+  rownames(expr) <- NULL
+
+  # R does not allow a zero-length column name (attempting `` = ... fails).
+  # Use a single space " " as a blank-looking header instead.
+  empty_col <- data.frame(blank = rep(NA, nrow(left_tbl)), stringsAsFactors = FALSE)
+  names(empty_col) <- " "
+
+  combined <- cbind(left_tbl, empty_col, expr, stringsAsFactors = FALSE)
+
+  writexl::write_xlsx(list(Sheet1 = combined), path = file)
+  invisible(file)
+}
+write_two_tables_minimal(res.final, here("data","cytokine","res_final_ETI.xlsx"))
+```
+
+# 6 Save figures
+```{r}
+# out <- here("data","plots","cytokine")
+# if(!dir.exists(out)) {
+#   dir.create(out,recursive = TRUE)
+# }
+# 
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 1600)
+# 
+# # pca
+# p1 +
+#   theme(plot.tag = element_text(size = 14, face = "bold"))
+# 
+# ggsave(plot=last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = paste0(out,"/","ETI_PCA_all.jpeg"),
+#        height=4,
+#        width=5)
+# 
+# ggsave(plot=p_sample + p2 +
+#   theme(plot.tag = element_text(size = 14, face = "bold")),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = paste0(out,"/","ETI_PCA_fibro.jpeg"),
+#        height=4,
+#        width=9)
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 100)
+# 
+# # combined cytokine
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 1600)
+# 
+# ggsave(plot=p_sample + p2 +
+#   theme(plot.tag = element_text(size = 14, face = "bold", family="Arial")),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = here("data","plots","ETI","bal_ETI.combined.cytoLvl.MDSplot.jpeg"),
+#        height=4,
+#        width=9)
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 100)
+# 
+# # profibrotic cytokine
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 1600)
+# 
+# ggsave(plot=p_sample + p2 +
+#   theme(plot.tag = element_text(size = 14, face = "bold", family="Arial")),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = here("data","plots","ETI","bal_ETI.combined.cytoLvl.fibro.MDSplot.jpeg"),
+#        height=4,
+#        width=9)
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 100)
+```
+
+# 7 Save tables
+```{r}
+scores_final %>% write_csv(here("output","Fig6B_cytokine.csv"))
+
+```

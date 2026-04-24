@@ -1,0 +1,1421 @@
+---
+title: 'Analysis of tissue-resident alveolar macrophages (AM)'
+author:
+- name: Anson Wong
+date: "`r Sys.Date()`"
+description: null
+output: html_document
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+xaringanExtra::use_panelset()
+
+```
+
+# 1 Load packages
+```{r}
+suppressPackageStartupMessages({
+library(Seurat)
+library(here)
+library(qs)
+library(forcats)
+library(pals)
+library(ggplot2)
+library(ggpubr)
+library(speckle)
+library(rstatix)
+library(scCustomize)
+library(patchwork)
+library(dplyr)
+library(Cepo)
+library(phateR)
+library(slingshot)
+library(tradeSeq)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(ReactomePA)
+library(readr)
+library(cowplot)
+library(harmony)
+library(scattermore)
+library(ggrastr)
+library(viridis)
+library(scater)
+library(circlize)
+library(ggplotify)
+})
+set.seed(1990)
+
+```
+
+# 2 Annotation, integration, clustering, finding marker genes
+Cells annotated as AM, Prolif M and RecM in the combined dataset were extracted for subclustering.
+RecM cluster was included for subclustering to aid a better TRM projection in UMAP, but they are not included for analysis here.
+Methods for normalization, integration, clustering and annotation were the same.
+
+For details, refer to code/bal_TRM.integration_clustering.R
+
+# 3 Subclustering
+## 3.1 Load clustered object
+```{r}
+seu <- qread(here("../archive_cf-eti-bal/SCEs/bal_TRM.integrated.clustered.SEU.qs"),
+             nthreads=24) # with RecM
+
+seu$predicted.ann_finest_level <- factor(seu$predicted.ann_finest_level)
+seu$sampleID <- factor(seu$sampleID)
+seu$Capture <- factor(seu$Capture)
+seu$Condition <- factor(seu$Condition)
+seu$Bronchiectasis <- factor(seu$Bronchiectasis)
+
+# SCT_snn_res.2 was selected for subclustering
+levels(seu$SCT_snn_res.3)
+seu$SCT_snn_res.3 <- factor(seu$SCT_snn_res.3,
+                            levels=as.character(seq(1,56)))
+
+# flip the UMAP x axis for easier visualization
+seu@reductions$umap@cell.embeddings[,2] <- -seu@reductions$umap@cell.embeddings[,2]
+
+```
+
+## 3.2 Visualize UMAP embeddings
+```{r}
+# prepare colours
+colours <- c(brewer.paired(12), brewer.pastel1(9), brewer.accent(8), brewer.set1(9),rev(brewer.dark2(8)), 
+             brewer.set3(12))
+
+p1 <- DimPlot(seu, 
+        reduction = 'umap',
+        pt.size = 0.1,
+        label = FALSE, 
+        shuffle = TRUE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 2.5, 
+        cols=colours,
+        # cols=c("#054a91", "#fb6f92", "#81a4cd", "#b79ced","7d451b","#a3b18a", 
+        #        "#0e9594", "#f77f00", "#b23a48"),
+        split.by = "Condition",
+        group.by = "predicted.ann_finest_level") +
+  #scale_x_continuous(breaks = c(-5, 0, 5)) +
+  #scale_color_manual(values=Annotation.colours) +
+  labs(x = NULL, y = NULL) + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_blank(),
+        text=element_text(family="Arial"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 10),
+        strip.text.x = element_text(face = "bold", vjust=2, size=12))
+
+p2 <- DimPlot(seu, 
+        reduction = 'umap',
+        pt.size = 0.1,
+        #label.box = TRUE,
+        label = FALSE, 
+        shuffle = TRUE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 2.5, 
+        cols=colours,
+        # cols=c("#054a91", "#fb6f92", "#81a4cd", "#b79ced","7d451b","#a3b18a", 
+        #        "#0e9594", "#f77f00", "#b23a48"),
+        split.by = "Condition",
+        group.by = "SCT_snn_res.3") + #NoLegend() +
+  #scale_x_continuous(breaks = c(-5, 0, 5)) +
+  #scale_color_manual(values=Annotation.colours) +
+  labs(x = NULL, y = NULL) + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_blank(),
+        text=element_text(family="Arial"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 10),
+        strip.text.x = element_text(face = "bold", vjust=2, size=12))
+
+p3 <- DimPlot(seu, 
+        reduction = 'umap',
+        pt.size = 0.1,
+        label = FALSE, 
+        shuffle = TRUE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 2.5, 
+        cols=colours,
+        # cols=c("#054a91", "#fb6f92", "#81a4cd", "#b79ced","7d451b","#a3b18a", 
+        #        "#0e9594", "#f77f00", "#b23a48"),
+        # split.by = "Condition",
+        group.by = "celltype") +
+  #scale_x_continuous(breaks = c(-5, 0, 5)) +
+  #scale_color_manual(values=Annotation.colours) +
+  labs(x = NULL, y = NULL) + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_blank(),
+        text=element_text(family="Arial"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 10),
+        strip.text.x = element_text(face = "bold", vjust=2, size=12))
+
+p4 <- DimPlot(seu, 
+        reduction = 'umap',
+        pt.size = 0.1,
+        label.box = TRUE,
+        label = TRUE, 
+        shuffle = TRUE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 2, 
+        cols=colours,
+        # cols=c("#054a91", "#fb6f92", "#81a4cd", "#b79ced","7d451b","#a3b18a", 
+        #        "#0e9594", "#f77f00", "#b23a48"),
+        # split.by = "Condition",
+        group.by = "SCT_snn_res.3") + NoLegend() +
+  #scale_x_continuous(breaks = c(-5, 0, 5)) +
+  #scale_color_manual(values=Annotation.colours) +
+  labs(x = NULL, y = NULL) + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_blank(),
+        text=element_text(family="Arial"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 10),
+        strip.text.x = element_text(face = "bold", vjust=2, size=12))
+
+p1
+p2
+p3
+p4
+
+```
+
+## 3.3 Visualize proportion of cells per cluster
+```{r}
+
+labels <- c("predicted.ann_finest_level","SCT_snn_res.3")
+p <- vector("list",length(labels))
+
+for(label in labels){
+  seu@meta.data %>%
+    ggplot(aes(x = !!sym(label), fill = !!sym(label))) +
+    geom_bar() +
+    geom_text(aes(label = ..count..), stat = "count",
+              angle=90, colour = "black", size = 2) +
+    scale_y_log10() +
+    theme(axis.text.x = element_blank(),
+          axis.title.x = element_blank(),
+          axis.ticks.x = element_blank()) +
+    NoLegend() + scale_fill_manual(values = rev(colours)) +
+    labs(y = "No. Cells (log scale)") -> p1
+  
+  seu@meta.data %>%
+    dplyr::select(!!sym(label), Condition) %>%
+    group_by(!!sym(label), Condition) %>%
+    summarise(num = n()) %>%
+    mutate(prop = num / sum(num)) %>%
+  ggplot(aes(x = !!sym(label), y = prop * 100, 
+             fill = Condition)) + 
+    geom_bar(stat = "identity") +
+    theme(axis.text.x = element_text(angle = 45, size=6,
+                                     vjust = 1, 
+                                     hjust = 1)) +
+    labs(y = "% Cells", fill = "Condition") -> p2
+  
+  p1 / p2 -> p[[label]]
+}
+p
+
+```
+
+## 3.4 Manual annotation
+```{r}
+## this is using UMAP with harmony-adjusted embeddings.
+# draft1
+draft1 <- factor(
+      case_when(
+        seu$celltype == "RecM" ~ "RecM",
+        seu$celltype == "Prolif M" ~ "Prolif M"))
+# draft2
+draft2 <- setNames(c("AM-IFI27hi","AM-IFI27hi","AM","AM","AM", # 1-5
+                     "AM-CCL","AM","AM","RecM","AM", # 6-10
+                     "AM-lipid","RecM","AM","AM-lipid","AM", # 11-15
+                     "AM-CCL","AM-IFI27hi","AM","AM","AM-MT", # 16-20
+                     "AM","AM","AM","AM-CCL","AM", # 21-25
+                     "Prolif M","AM-IFI27hi","AM-CCL","AM","AM", # 26-30
+                     "Prolif M","AM","AM","AM","AM", # 31-35
+                     "AM-CCL","AM","AM-lipid","AM","AM", # 36-40
+                     "AM-lipid","AM-CCL","AM","AM","AM-CCL", # 41-45
+                     "AM","RecM","AM-CCL","AM","AM-CCL", # 46-50
+                     "AM","AM","RecM","Prolif M","AM-IFI27hi", # 51-55
+                     "AM"
+                     ), levels(seu$SCT_snn_res.3))
+
+draft2 <- factor(setNames(draft2[seu$SCT_snn_res.3],colnames(seu)),
+                     levels=c("AM-CCL",
+                              "AM-MT",
+                              "AM-lipid",
+                              "AM-IFI27hi",
+                              "AM",
+                              "RecM",
+                              "Prolif M"
+                              ))
+
+subtype <- coalesce(draft1,draft2)
+seu <- AddMetaData(seu, metadata = subtype, col.name = "subtype")
+
+# Remove AM cells that are closely clustered with RecM
+seu <- subset(seu, subtype %in% c("AM-CCL", "AM-MT", "AM-lipid", "AM-IFI27hi", "AM", "Prolif M", "RecM"))
+seu$subtype <- fct_drop(seu$subtype)
+seu$subtype <- factor(seu$subtype, levels=c("AM-CCL", "AM-MT", "AM-lipid", "AM-IFI27hi", "AM", "Prolif M", "RecM"))
+
+```
+
+## 3.5 Save object
+```{r}
+celltype <- "AM"
+date <- Sys.Date()
+if(!dir.exists(here("data","SCEs","final.annot"))) {
+  dir.create(here("data","SCEs","final.annot"), recursive = TRUE)
+}
+
+out <- here("data","SCEs","final.annot",paste0("bal_",celltype,".final_annot.SEU.qs"))
+if(!file.exists(out)) {
+  qsave(seu,file=out,nthreads=24)
+}
+
+```
+
+
+# 4 Analysis
+## 4.1 Read processed object
+```{r}
+# load analysis object
+celltype <- "AM"
+seu <- qread(here("data","SCEs","final.annot",paste0("bal_",celltype,".final_annot.SEU.qs")),
+             nthreads=24)
+
+```
+
+## 4.2 Prepare object for downstream analysis
+```{r}
+# Subset object
+seu <- subset(seu, Condition != "CF.ETI" & 
+              sampleID != "M1C170C" & sampleID != "M1C176" & sampleID != "M1C180")
+gc()
+seu$Condition <- fct_drop(seu$Condition)
+seu$sampleID <- fct_drop(seu$sampleID)
+
+# Add Condition2
+draft1 <- factor(
+      case_when(
+        seu$Condition == "Control" ~ "C"))
+draft2 <- factor(
+  case_when(
+    seu$Bronchiectasis == "No" ~ "CFN",
+    seu$Bronchiectasis == "Yes" ~ "CFB"
+  )
+)
+
+Condition2 <- coalesce(draft1,draft2)
+names(Condition2) <- colnames(seu)
+seu <- AddMetaData(seu, Condition2, col.name = "Condition2")
+seu$Condition2 <- factor(seu$Condition2,levels=c("C","CFB","CFN"))
+
+# Rename Condition
+seu$Condition <- factor(
+  case_when(
+    seu$Condition == "Control" ~ "C",
+    seu$Condition == "CF" ~ "CF"
+  ),
+  levels=c("C","CF")
+)
+# Assign ID for analysis
+seu$sampleID <- factor(seu$sampleID,
+                       levels=c("M1N066","M1N075","M1N078","M1N080","M1N087","M1N092", # C
+                                "M1C160(1)","M1C188","M1C166(1)","M1C190C","M1C196B","M1C198B","M1C208A","M1C209A", # CFB
+                                "M1C170D","M1C176C","M1C180D","M1C177","M1C191B","M1C199B","M1C201A","M1C207B" # CFN
+                                ))
+
+ID <- setNames(c(paste0("C-",1:6),paste0("CFB-",1:8),paste0("CFN-",1:8)),
+               levels(seu$sampleID))
+
+ID <- setNames(factor(ID[seu$sampleID],levels=c(paste0("C-",1:6),paste0("CFB-",1:8),paste0("CFN-",1:8)),),
+               colnames(seu))
+
+seu <- AddMetaData(seu, ID, col.name = "ID")
+
+# Set colours
+subtype.colours <- setNames(c( "#7209b7","#ef476f", "#ffd166", "#83c5be",
+                                 "#3a6ea5", "#9a8c98", "#ced4da"),
+                               levels(seu$subtype))
+Condition2.colours <- setNames(c("#26547c","#ef476f","#ffd166"),
+                               levels(seu$Condition2))
+Condition.colours <- setNames(c("#26547c","#fb8b24"),
+                              levels(seu$Condition))
+
+subtype.labels <- c("AM-CCL","AM-MT","AM-lipid", 
+                    expression('AM-'*italic('IFI27')^'hi'),
+                    "AM","Prolif M","RecM")
+```
+
+## 4.3 UMAP embeddings
+```{r fig.height=3.5, fig.width=10}
+# split by severity
+p1 <- DimPlot(seu, 
+        reduction = 'umap',
+        pt.size = 0.2,
+        label.box = FALSE,
+        label = FALSE, 
+        shuffle = TRUE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 4, 
+        cols=subtype.colours,
+        split.by = "Condition2",
+        group.by = "subtype") + #NoLegend() +
+  labs(x = NULL, y = NULL) + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_blank(),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text.align = 0,
+        legend.text = element_text(size = 12),
+        strip.text.x = element_text(face = "bold", vjust=2, size=16)) +
+  scale_color_manual(values = subtype.colours,
+                    labels = subtype.labels) +
+  guides(
+    color = guide_legend(
+      override.aes = list(
+        size  = 5    # make the points in the legend larger
+        #shape = 15    # change the legend symbol shape if you like
+      )
+    )
+  )
+
+suppressWarnings(print(p1))
+
+```
+
+## 4.4 Proportion of cells
+```{r fig.width=5, fig.height=4}
+# calculate the proportion of cells --------------------------------------------
+seu.trm <- subset(seu, subtype %in% c("Prolif M","RecM"),invert=TRUE)
+seu.trm$subtype <- fct_drop(seu.trm$subtype)
+
+props <- getTransformedProps(clusters=seu.trm$subtype,
+                             sample=seu.trm$ID)
+                             
+props$Proportions %>%
+  data.frame %>%
+  dplyr::mutate(Condition = c(rep("C",30),rep("CF",80)),
+                Condition2 = c(rep("C",30),rep("CFB",40),rep("CFN",40))) -> df
+
+df$Condition <- factor(df$Condition, levels=c("C","CF"))
+df$Condition2 <- factor(df$Condition2, levels=c("C","CFB","CFN"))
+
+# stacked bar plot of cell proportion per sampleID
+ggplot(df, aes(x = sample, y = Freq, fill = clusters)) +
+  geom_bar(stat = "identity", position="stack") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size=8,
+                                   colour = "black"),
+        axis.text.y = element_text(size=8,
+                                   colour = "black"),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(face="bold", size=12)) +
+  labs( y = "Proportion", fill="Subtype", x="Participant") +
+  guides(fill = guide_legend(keyheight=0.8,
+                             keywidth=0.8)) +
+  scale_fill_manual(values = subtype.colours, labels = subtype.labels) +
+  theme(legend.text.align = 0, legend.title = element_blank())
+
+# Wilcox test on pairwise comparisons of control, CF mild and CF severe --------
+stat.test <- df %>%
+  group_by(clusters) %>%
+  wilcox_test(Freq ~ Condition2, 
+              ref.group = "C", 
+              p.adjust.method = "BH")
+stat.test <- stat.test %>%
+  add_xy_position(x = "clusters", dodge = 0.8)
+
+# box plot
+dodge_width <- 0.8  # adjust this value to widen spacing between groups within clusters
+
+p5 <- ggplot(df, aes(x = clusters, y = Freq, color = Condition2)) +
+  geom_boxplot(
+    fill = NA,
+    outlier.shape = NA,
+    position = position_dodge(width = dodge_width)
+  ) +
+  geom_point(
+    position = position_dodge(width = dodge_width),
+    size = 2, alpha = 0.8
+  ) +
+  stat_pvalue_manual(
+    stat.test,
+    label = "p.adj.signif",
+    tip.length = 0.01,
+    bracket.size = 0.4,
+    hide.ns = TRUE
+  ) +
+  scale_color_manual(values = Condition2.colours) +
+  labs(
+    y = "Proportion"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_blank(),
+    axis.text.x = element_text(angle = 40, hjust = 1, size = 10, colour = "black"),
+    axis.text.y = element_text(size = 12, colour = "black"),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    legend.position = c(0.01, 0.99),
+    legend.justification = c(0, 1),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key.size = unit(1, "lines"),
+    legend.text = element_text(size = 12)
+  ) +
+  scale_x_discrete(labels = subtype.labels)
+
+p5
+
+```
+
+
+## 4.4 Marker gene analysis
+### 4.4.1 Call marker genes with Cepo
+```{r}
+# Cepo
+cepoMarkers <- Cepo(seu[["SCT"]]@data,
+                    seu$subtype,
+                    exprsPct = 0.2)
+cepoMarkers$stats <- cepoMarkers$stats[, c("AM.CCL","AM.MT","AM.lipid","AM.IFI27hi","AM","Prolif.M","RecM")]
+cepoMarkers$stats <- cepoMarkers$stats[!grepl('^A[C|F|P|L][0|1]', row.names(cepoMarkers$stats)),]
+
+sapply(1:ncol(cepoMarkers$stats), function(i){
+  names(sort(cepoMarkers$stats[,i], decreasing = TRUE))[1:300]
+}) %>% data.frame() -> dat2
+
+colnames(dat2) <- colnames(cepoMarkers$stats)
+dat2
+
+colnames(dat2) <- colnames(cepoMarkers$stats)
+dat2 %>% data.frame() %>% write.csv(file=here("data","AM.markers.csv"))
+```
+
+### 4.4.2 DotPlot of selected features
+```{r fig.height=7, fig.width=4}
+# Selected ---------------------------------------------------------------------
+universal <- c("FABP4","MRC1","MARCO","C1QA")
+ccl <- c("CCL4","CCL3","CCL4L2","CCL20","CXCL5","MARCKS","TNFAIP6")
+mt <- c("MT1X","MT1G","MT1F","MT1E","MT1H")
+lipid <- c("LAMP1","CD36","ABCA1","LINC01146","HDAC9")
+ifi27 <- c("IFI27","OVCH1","SLC19A3","AQP3","GPD1")
+fibro <- c("SPP1","MMP9","CCL18","CHI3L1","CX3CR1")
+#prolif <- c("PCLAF","MKI67","NUSAP1","CENPF","TOP2A")
+
+selected <- c(universal,ccl,mt,lipid,ifi27)
+
+# function colors
+scavenger <- "#197278"
+cytokine <- "#5A189A"
+metallothionein <- "#d00000"
+lipid <- "#003F88"
+#cycling <- "#972d07"
+ecm <- "#FF5D8F"
+others <- "#000000"
+
+gene.colours <- setNames(c(lipid, scavenger, scavenger, others, #universal
+                           rep(cytokine,5),others,others, #ccl
+                           rep(metallothionein,5), #mt
+                           rep(lipid,5), #lipid
+                           rep(others,4),lipid #ifi27
+),
+                         selected)
+# plot
+subtype.labels <- c("AM-CCL","AM-MT","AM-lipid", 
+                    expression('AM-'*italic('IFI27')^'hi'),
+                    "AM")
+
+# version 2: vertical
+p2 <- DotPlot(seu.trm,
+        features = rev(selected),
+        group.by = "subtype",
+        col.max = 2,
+        col.min = -2,
+        dot.scale = 6
+        ) + coord_flip() +
+  geom_point(aes(size=pct.exp), shape = 21, colour="black", stroke=0.5) +
+  FontSize(y.text = 10, x.text = 8) + 
+  labs(y = element_blank(), x = element_blank()) + 
+  theme(
+        axis.text.y = element_text(size=10,
+                                   face="italic",
+                                   #angle = 45,
+                                   #hjust = 1,
+                                   #vjust = 1,
+                                   color=rev(gene.colours)),
+        axis.text.x = element_text(size=10,angle=45,vjust=1,hjust=1),
+        legend.direction="vertical",
+        legend.position="right",
+        legend.justification = "bottom",
+        legend.box="vertical",
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8,family = "Arial",angle=90),
+        ) +
+  scale_color_gradient(low = brewer.ylorrd(9)[1], high=brewer.ylorrd(9)[8], name="Mean Expression") +
+  scale_y_discrete(labels = subtype.labels) +
+  scale_size_continuous(limits = c(0, 100), 
+                        breaks = c(0, 25, 50, 75, 100),
+                        labels=c(0,"",50,"",100)) +
+  guides(size=guide_legend(override.aes=list(shape=21, 
+                                               colour="black", 
+                                               fill="#adb5bd"),
+                                               title="% of exp. cells",
+                                               label.position="right",
+                                               title.position="left",
+                                               title.hjust=0.5
+                                               ),
+           colour = guide_colorbar(#barwidth       = unit(0.4, "cm"),
+                                   #barheight      = unit(2,   "cm"),
+                                   title.position = "left",
+                                   title.hjust    = 0.5
+                                  ))
+
+suppressWarnings(print(p2))
+```
+
+
+## 4.5 Group-based differential expression in AM-CCL
+### 4.5.1 Prepare object
+```{r}
+s <- subset(seu, subtype=="AM-CCL")
+celltype <- "AM-CCL"
+```
+
+Two comparisons:
+CFN (n=8) vs C (n=6)
+```{r}
+celltype <- "AM-CCL"
+# set idents
+Idents(s) <- "Condition2" # Change idents here
+
+# define condition
+test <- "CFN"
+control <- "C"
+
+compare <- paste0(test,"_vs_",control)
+if(!dir.exists(here("data", "DE",celltype, compare))) {
+  dir.create(here("data", "DE",celltype, compare,"DEG"), recursive = TRUE)
+  dir.create(here("data", "DE",celltype, compare,"Reactome"), recursive = TRUE)
+  dir.create(here("data", "DE",celltype, compare,"WikiPathway"), recursive = TRUE)
+  dir.create(here("data", "DE",celltype, compare,"GO_CC"), recursive = TRUE)
+  dir.create(here("data", "DE",celltype, compare,"GO_BP"), recursive = TRUE)
+  dir.create(here("data", "DE",celltype, compare,"GO_MF"), recursive = TRUE)
+}
+```
+
+CFB (n=8) vs C (n=6)
+```{r}
+celltype <- "AM-CCL"
+# set idents
+Idents(s) <- "Condition2" # Change idents here
+
+# define condition
+test <- "CFB"
+control <- "C"
+
+compare <- paste0(test,"_vs_",control)
+if(!dir.exists(here("data", "DE",celltype, compare))) {
+  dir.create(here("data", "DE",celltype, compare,"DEG"), recursive = TRUE)
+  dir.create(here("data", "DE",celltype, compare,"Reactome"), recursive = TRUE)
+  dir.create(here("data", "DE",celltype, compare,"WikiPathway"), recursive = TRUE)
+  dir.create(here("data", "DE",celltype, compare,"GO_CC"), recursive = TRUE)
+  dir.create(here("data", "DE",celltype, compare,"GO_BP"), recursive = TRUE)
+  dir.create(here("data", "DE",celltype, compare,"GO_MF"), recursive = TRUE)
+}
+```
+
+Two comparisons:
+CFN (n=8) vs CFB (n=8)
+```{r}
+celltype <- "AM-CCL"
+# set idents
+Idents(s) <- "Condition2" # Change idents here
+
+# define condition
+test <- "CFN"
+control <- "CFB"
+
+compare <- paste0(test,"_vs_",control)
+if(!dir.exists(here("data", "DE",celltype, compare))) {
+  dir.create(here("data", "DE",celltype, compare,"DEG"), recursive = TRUE)
+  dir.create(here("data", "DE",celltype, compare,"Reactome"), recursive = TRUE)
+  dir.create(here("data", "DE",celltype, compare,"WikiPathway"), recursive = TRUE)
+  dir.create(here("data", "DE",celltype, compare,"GO_CC"), recursive = TRUE)
+  dir.create(here("data", "DE",celltype, compare,"GO_BP"), recursive = TRUE)
+  dir.create(here("data", "DE",celltype, compare,"GO_MF"), recursive = TRUE)
+}
+```
+
+### 4.5.2 DE
+DE results shown in Table E6 are written by code/writeDE.R
+```{r}
+# condition vs healthy
+markers <- FindMarkers(s,
+                       ident.1=test, # condition
+                       ident.2=control, # healthy
+                       test.use="MAST",
+                       random.seed=1990,
+                       recorrect_umi=FALSE, # already run PrepSCTFindMarkers()
+                       min.pct=0.1,
+                       logfc.threshold = 0.25,
+                       only.pos = FALSE)
+
+markers$gene <- rownames(markers)
+
+# get sig up- and down-regulated genes
+deg <- markers %>% dplyr::filter(p_val_adj < 0.05)
+
+up <- deg %>% dplyr::filter(p_val_adj < 0.05 & avg_log2FC > 0.25) %>% dplyr::arrange(desc(avg_log2FC))
+down <- deg %>% dplyr::filter(p_val_adj < 0.05 & avg_log2FC < -0.25) %>% dplyr::arrange(avg_log2FC)
+
+# write results
+write.csv(up %>%
+            dplyr::relocate(gene),
+            file = here("data","DE",celltype,compare,"DEG", paste0(celltype,".",compare,".DEG-up.csv")),
+            row.names = FALSE)
+write.csv(down %>%
+            dplyr::relocate(gene),
+            file = here("data","DE",celltype,compare,"DEG", paste0(celltype,".",compare,".DEG-down.csv")),
+            row.names = FALSE)
+write.csv(deg %>%
+            dplyr::relocate(gene),
+            file = here("data","DE",celltype,compare,"DEG", paste0(celltype,".",compare,".DEG-all.csv")),
+            row.names = FALSE)
+write.csv(markers %>%
+            dplyr::relocate(gene),
+            file = here("data","DE",celltype,compare,"DEG", paste0(celltype,".",compare,".DEG-raw.csv")),
+            row.names = FALSE)
+```
+
+### 4.5.3 GO enrichment
+Top 10 results shown in Table E11 are written by code/goEnrichment.R
+```{r}
+# get ensemblDB
+getCols <- setNames(c("SYMBOL","ENTREZID"),c("SYMBOL","ENTREZID"))
+
+genes <- data.frame(
+  lapply(getCols, function(column) {
+    mapIds(
+      x = org.Hs.eg.db,
+      keys = unique(deg$gene),
+      keytype = "SYMBOL",
+      column = column)
+  }),
+  row.names = unique(deg$gene))
+
+# GO BP enrichment
+go.up.bp <- enrichGO(genes[up$gene,]$ENTREZID, OrgDb=org.Hs.eg.db, ont="BP",
+                       pAdjustMethod = "BH", readable=TRUE, pvalueCutoff = 0.05)
+
+go.down.bp <- enrichGO(genes[down$gene,]$ENTREZID, OrgDb=org.Hs.eg.db, ont="BP",
+                     pAdjustMethod = "BH", readable=TRUE, pvalueCutoff = 0.05)
+
+# Remove redundant GO terms
+go.up.bp <- clusterProfiler::simplify(go.up.bp)
+go.down.bp <- clusterProfiler::simplify(go.down.bp)
+
+# write results
+out <- here("data","GOBP","ruv",celltype,compare)
+if (!dir.exists(out)) {
+  dir.create(here("data","GOBP","ruv",celltype,compare),recursive = TRUE)
+}
+
+go.up.bp@result %>%
+  dplyr::rename(Pathway=Description) %>%
+  dplyr::mutate(Celltype = "AM-CCL") %>%
+  dplyr::mutate(Comparison=compare) %>%
+  dplyr::mutate(Direction="Up") %>%
+  dplyr::mutate(Genes=gsub("/","; ",go.up.bp@result$geneID)) %>%
+  dplyr::select(Pathway, Celltype, Comparison, Direction, ID, Count, pvalue, p.adjust, Genes) %>%
+  slice_head(n = 10) -> up.df
+write_csv(up.df, file = here("data","GOBP","ruv",celltype,compare,
+                        paste0(celltype,".",compare,".GO_BP-up.csv")))
+
+go.down.bp@result %>%
+  dplyr::rename(Pathway=Description) %>%
+  dplyr::mutate(Celltype = "AM-CCL") %>%
+  dplyr::mutate(Comparison=compare) %>%
+  dplyr::mutate(Direction="Down") %>%
+  dplyr::mutate(Genes=gsub("/","; ",go.down.bp@result$geneID)) %>%
+  dplyr::select(Pathway, Celltype, Comparison, Direction, ID, Count, pvalue, p.adjust, Genes) %>%
+  slice_head(n = 10) -> down.df
+write_csv(down.df, file = here("data","GOBP","ruv",celltype,compare,
+                        paste0(celltype,".",compare,".GO_BP-down.csv")))
+```
+
+### 4.5.4 Dotplot of AM-CCL markers
+```{r fig.height=2.5, fig.width=8}
+# DotPlot of TRM-CCL
+genes <- c("EREG",
+           "CCL2","CCL8",
+           "CXCL1","CXCL2","CXCL3","CXCL8",
+           "IL17RB","IL1A","IL6",
+           "TNFAIP3","TNF","ZFP36","TRIB1",
+           "EGR1","STAT4","CD274",
+           "FOS","JUN","NFKBIA","NFKBIZ","NFKB1")
+
+pt1 <- DotPlot(s,
+            features = genes,
+            group.by = "Condition2",
+            #cols=c("#B2182B","#F7F7F7","#2166AC"),
+            col.max = 1,
+            col.min = -1,
+            dot.scale = 6
+            ) + #coord_flip() +
+    geom_point(aes(size=pct.exp), shape = 21, colour="black", stroke=0.5) +
+    FontSize(y.text = 10, x.text = 8) + 
+    labs(y = element_blank(), x = element_blank()) + 
+      theme_bw() +
+    theme(
+          axis.text.x = element_text(size=10,
+                                     face="italic",
+                                     angle = 45,
+                                     hjust = 1,
+                                     vjust = 1),
+          axis.text.y = element_text(size=10,hjust=0),
+          legend.direction="vertical",
+          legend.position="right",
+          legend.title.position = "left",
+          legend.justification = "bottom",
+          legend.box="horizontal",
+          legend.text = element_text(size = 8),
+          legend.title = element_text(size = 8,angle=90),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank()
+          ) +
+      
+    scale_color_gradientn(colours = rev(brewer.rdbu(11)[2:10]),name = "Mean Expression") +
+    scale_size_continuous(limits = c(0, 100),
+                          breaks = c(0, 25, 50, 75, 100),
+                          labels=c(0,"",50,"",100)) +
+    guides(size=guide_legend(override.aes=list(shape=21, 
+                                               colour="black", 
+                                               fill="#adb5bd"),
+                                               title="% of exp. cells",
+                                               label.position="right",
+                                               title.position="left",
+                                               title.hjust=0.5
+                                               ),
+           colour = guide_colorbar(#barwidth       = unit(0.4, "cm"),
+                                   #barheight      = unit(2,   "cm"),
+                                   title.position = "left",
+                                   title.hjust    = 0.5
+                                  ))
+pt1
+
+```
+
+## 4.6 PHATE analysis of AM-CCL cluster
+To further capture local transcriptional heterogeneity between groups within TRM-CCL cluster, we inferred trajectory from cell embeddings of PHATE, an unsupervised dimensionality reduction method which performs well on preserving the local and global structure of highly complex datasets.
+
+### 4.6.1 PHATE embeddings
+```{r fig.height=3, fig.width=8}
+s <- subset(seu, subtype=="AM-CCL")
+Idents(s) <- "Condition2"
+
+# split object
+obj.list <- SplitObject(s, split.by="Condition2")
+obj.list <- obj.list[levels(s$Condition2)]
+
+# check number of cells per Subject
+lapply(obj.list,ncol)
+
+# Downsample to the minimum number of cells among HC, CFN and CFB
+# This ensures the PHATE project is not biased by dominated cell number in any group
+set.seed(1990)
+ds.obj.list <- lapply(X = obj.list, FUN = function(x) {
+  n <- min(ncol(obj.list[[1]]),ncol(obj.list[[2]]),ncol(obj.list[[3]]))
+  x <- subset(x, downsample=n)
+})
+
+ds.obj.list <- ds.obj.list[levels(s)]
+lapply(ds.obj.list,ncol)
+
+ds.cells <- lapply(X=ds.obj.list, FUN=function(x) {colnames(x)})
+lapply(ds.cells,length)
+
+s <- merge(x=ds.obj.list[[1]], y=ds.obj.list[2:length(ds.obj.list)])
+s$Condition2 <- factor(s$Condition2, levels=levels(seu$Condition2))
+
+# PHATE
+var.features <- SelectIntegrationFeatures(ds.obj.list,nfeatures=3000)
+phate_data <- t(as.data.frame(s@assays$SCT@data)[var.features,])
+reticulate::py_config()
+phate_output <- phate(phate_data,
+                      knn=50,
+                      npca=50,
+                      t=50,
+                      n.jobs = 1,
+                      seed=1990
+                      )
+
+embeddings <- phate_output$embedding
+
+s[["PHATE"]] <- CreateDimReducObject(embeddings = embeddings,
+                                     key = "PHATE_",
+                                     assay = DefaultAssay(s))
+#s@reductions$PHATE@cell.embeddings[,2] <- -s@reductions$PHATE@cell.embeddings[,2]
+
+# UMAP
+# FindNeighbors
+s <- FindNeighbors(s,reduction = "PHATE", dims = 1:2)
+s <- FindClusters(s, resolution = 1, algorithm = 4, method="igraph",random.seed = 1990)  #method="matrix"
+#s@reductions$PHATE@cell.embeddings[,1] <- -s@reductions$PHATE@cell.embeddings[,1]
+s@reductions$PHATE@cell.embeddings[,2] <- -s@reductions$PHATE@cell.embeddings[,2]
+
+# grouped by Condition
+p5a <- DimPlot(s,
+        reduction = "PHATE",
+        group.by="Condition2",
+        cols=Condition2.colours,
+        pt.size = 0.01,
+        shuffle = TRUE,
+        label = FALSE) +
+  labs(title = "Condition", x = NULL, y = NULL) +
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_text(size=12,face="plain"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 10),
+        legend.text.align = 0,
+        strip.text.x = element_text(face = "bold", vjust=2, size=12))
+
+DimPlot(s,
+        reduction = "PHATE",
+        group.by = "SCT_snn_res.1",
+        shuffle = TRUE,
+        label = TRUE,
+        #cols=cluster.colours,
+        ) + ggtitle(label = "PHATE") +
+  labs(x = NULL, y = NULL) +
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_blank(),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 10),
+        legend.text.align = 0,
+        strip.text.x = element_text(face = "bold", vjust=2, size=12)) + p5a
+
+# Group SCT_snn_res.1 clusters into 3 cell states
+# 1: 1,2,3,4,5,7,9,12,14,15,17,19
+# 2: 6,8,10,11,16
+# 3: 13,18,20
+cellstate <- setNames(c("1","1","1","1","1",
+                        "2","1","2","1","2",
+                        "2","1","3","1","1",
+                        "2","1","3","1","3"
+                        ),
+                      levels(s$SCT_snn_res.1))
+
+cellstate <- setNames(factor(cellstate[s$SCT_snn_res.1],
+                             levels=c("1","2","3")),
+                      colnames(s))
+
+s <- AddMetaData(s, cellstate, col.name = "cellstate")
+
+```
+
+### 4.6.2 PHATE visualization
+#### 4.6.2.1 Density plot of cells grouped by Condition2
+```{r fig.width=8, fig.height=3}
+s$Phate.UMAP1 <- s@reductions$PHATE@cell.embeddings[,1]
+s$Phate.UMAP2 <- s@reductions$PHATE@cell.embeddings[,2]
+s$CellID <- rownames(s@meta.data)
+s$Condition2 <- factor(s$Condition2, levels=c("C","CFB","CFN"))
+
+get_density <- function(x, y, ...) {
+  dens <- MASS::kde2d(x, y, ...)
+  ix <- findInterval(x, dens$x)
+  iy <- findInterval(y, dens$y)
+  ii <- cbind(ix, iy)
+  return(dens$z[ii])
+}
+
+dens.umap.list <- list()
+loop.cells <- levels(s$Condition2)
+
+for(i in seq_along(loop.cells)){
+    i.c <- loop.cells[i]
+    # change this to 1% of all cells
+    i.n <- ceiling(sum(s$Condition2 %in% i.c)/100)
+    if(i.n < 100){
+      i.n <- 100
+    }
+    i.dens <- get_density(s$Phate.UMAP1[s$Condition2 %in% i.c],
+                          s$Phate.UMAP2[s$Condition2 %in% i.c], n=i.n)
+    
+    dens.umap.list[[i.c]] <- data.frame("Condition2"=i.c,
+                                        "CellID"=s$CellID[s$Condition2 %in% i.c],
+                                        "Dens"=i.dens)
+}
+
+umap.dens <- do.call(rbind.data.frame, dens.umap.list)
+umap.dens.merge <- base::merge(s@meta.data, umap.dens, by=c('Condition2', 'CellID'))
+
+
+condition.order <- levels(s$Condition2)
+title.list <- setNames(c("HC","CFB","CFN"),
+                       levels(s$Condition2))
+pt.list <- list()
+for(x in seq_along(condition.order)){
+  x.c <- condition.order[x]
+  
+  p <- ggplot(umap.dens.merge,
+         aes(x=Phate.UMAP1, y=Phate.UMAP2)) +
+    geom_scattermore(data=umap.dens.merge[, c("Phate.UMAP1", "Phate.UMAP2")],
+                     colour='#adb5bd',pointsize =2) +
+    geom_point_rast(data=umap.dens.merge[umap.dens.merge$Condition2 %in% x.c, ],
+                    aes(colour=Dens),size=0.00000001) +
+    scale_colour_gradientn(colors = brewer.oranges(7),na.value = "#6c757d") +
+    labs(title=title.list[x.c], x="PHATE_1", y="PHATE_2") +
+    theme_cowplot() + #NoLegend() +
+    guides(colour=guide_colourbar(title="Density")) +
+    theme(plot.title=element_text(size=16,hjust=0.5,face="plain"),
+          legend.key.size = unit(0.2, "cm"),
+          legend.direction="horizontal",
+          legend.position="bottom",
+          legend.justification = "right",
+          axis.text=element_blank(),
+          axis.title=element_blank(),
+          axis.line = element_blank(),
+          axis.ticks=element_blank(),
+          legend.title=element_text(size=8),
+          legend.text=element_blank())
+    pt.list[[x.c]] <- p
+}
+
+p4 <- (pt.list[[1]] + NoLegend()) | (pt.list[[2]] | NoLegend()) | pt.list[[3]]
+p4
+```
+
+#### 4.6.2.2 Coloured by Condition and Cell State
+```{r fig.width=6, fig.height=3}
+state.colours <- setNames(c("#05a8aa","#780116","#ff6600"),levels(s$cellstate))
+
+p5a <- DimPlot(s,
+        reduction = "PHATE",
+        group.by="Condition2",
+        cols=Condition2.colours,
+        pt.size = 0.01,
+        shuffle = TRUE,
+        label = FALSE) +
+  labs(title = "Condition", x = NULL, y = NULL) +
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_text(size=14,face="plain"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 10),
+        legend.text.align = 0,
+        strip.text.x = element_text(face = "bold", vjust=2, size=12)) +
+  guides(
+    color = guide_legend(
+      override.aes = list(
+        size  = 4    # make the points in the legend larger
+        #shape = 15    # change the legend symbol shape if you like
+      )
+    )
+  )
+
+p5b <- DimPlot(s,
+        reduction = "PHATE",
+        group.by="cellstate",
+        cols=state.colours,pt.size=0.01,
+        shuffle = TRUE,
+        label = FALSE) +
+  labs(title = "Cell state", x = NULL, y = NULL) +
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_text(size=14,face="plain"),
+        text=element_text(family="Arial"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 10),
+        legend.text.align = 0,
+        strip.text.x = element_text(face = "bold", vjust=2, size=12)) +
+  guides(
+    color = guide_legend(
+      override.aes = list(
+        size  = 4    # make the points in the legend larger
+        #shape = 15    # change the legend symbol shape if you like
+      )
+    )
+  )
+
+p5a|p5b
+```
+
+
+### 4.6.3 Stacked bar plot of cell state composition
+```{r fig.width=3, fig.height=3}
+# Stacked by cell states
+props <- getTransformedProps(clusters=s$cellstate,
+                             sample=s$Condition2,
+                             transform = "asin")
+p6 <- props$Proportions %>%
+  data.frame %>%
+  #inner_join(info, by = c("sample" = "orig.ident")) %>%
+  ggplot(aes(x = sample, y = Freq, fill = clusters)) +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  labs(y = "Proportion", x="Condition", title="") +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size=10,
+                                   colour = "black"),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(size=8,
+                                   colour = "black"),
+        plot.title = element_text(hjust=0.5, size=12,face="plain"),
+        legend.text = element_text(size = 8),
+        legend.position="none",
+        legend.title = element_text(face="bold", size=8)) +
+  guides(fill = guide_legend(#override.aes = list(size = 0.01),
+                             keyheight=0.8,
+                             keywidth=0.8)) +
+  scale_fill_manual(values = state.colours)
+
+p6
+
+```
+```{r fig.width=4, fig.height=3}
+# 1) Compute proportions with sample = sampleID
+props <- getTransformedProps(clusters = s$cellstate,
+                             sample = s$sampleID,
+                             transform = "asin")
+
+# 2) Make a sample-level metadata table (keeps unique sampleIDs with their Condition2)
+# If s is a Seurat object, you can use: meta <- s@meta.data %>% distinct(sampleID, Condition2)
+meta <- data.frame(sample = as.character(s$sampleID),
+                   Condition2 = as.character(s$Condition2),
+                   stringsAsFactors = FALSE) %>%
+  distinct(sample, .keep_all = TRUE)
+
+# 3) Prepare the df used for stat tests / plotting
+df <- props$Proportions %>%
+  as.data.frame() %>%
+  # 'sample' column from props now contains sampleID values, join to meta to get Condition2
+  left_join(meta, by = "sample") %>%
+  mutate(
+    clusters = factor(clusters),
+    Condition2 = factor(Condition2)
+  )
+
+# (Optional) check levels
+# levels(df$Condition2)
+# levels(df$clusters)
+
+# 4) Pairwise Wilcoxon rank-sum tests per cluster (BH correction) using rstatix
+# set ref.group to your control label (example uses "C")
+stat.test <- df %>%
+  group_by(clusters) %>%
+  wilcox_test(Freq ~ Condition2, ref.group = "C", p.adjust.method = "BH") %>%
+  add_xy_position(x = "clusters", dodge = 0.8)
+
+# 5) Boxplot following your format, but using state.colours as the palette for Condition2
+# NOTE: ensure `state.colours` is appropriate for mapping to Condition2 (names or same order)
+dodge_width <- 0.8
+
+p5 <- ggplot(df, aes(x = clusters, y = Freq, color = Condition2)) +
+  geom_boxplot(
+    fill = NA,
+    outlier.shape = NA,
+    position = position_dodge(width = dodge_width)
+  ) +
+  geom_point(
+    position = position_dodge(width = dodge_width),
+    size = 2, alpha = 0.8
+  ) +
+  stat_pvalue_manual(
+    stat.test,
+    label = "p.adj.signif",
+    tip.length = 0.01,
+    bracket.size = 0.4,
+    hide.ns = TRUE
+  ) +
+  scale_color_manual(values = Condition2.colours) +    # using state.colours as requested
+  labs(y = "Proportion") +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_blank(),
+    axis.text.x = element_text(angle = 40, hjust = 1, size = 10, colour = "black"),
+    axis.text.y = element_text(size = 12, colour = "black"),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    legend.position = c(0.01, 0.99),
+    legend.justification = c(0, 1),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key.size = unit(1, "lines"),
+    legend.text = element_text(size = 12)
+  ) + NoLegend()
+  # if you have a vector of labels for clusters (subtype.labels), use it:
+  #scale_x_discrete(labels = subtype.labels)
+
+p5
+
+
+
+```
+
+### 4.6.4 Find markers in each cell state
+```{r}
+# Cepo
+cepoMarkers <- Cepo(s[["SCT"]]@data,
+                    s$cellstate,
+                    exprsPct = 0.2)
+cepoMarkers$stats
+cepoMarkers$stats <- cepoMarkers$stats[!grepl('^A[C|F|P|L][0|1]', row.names(cepoMarkers$stats)),]
+
+sapply(1:ncol(cepoMarkers$stats), function(i){
+  names(sort(cepoMarkers$stats[,i], decreasing = TRUE))[1:300]
+}) %>% data.frame() -> dat2
+
+colnames(dat2) <- levels(s$cellstate)
+dat2 %>% write.csv(file=here("data","AM-CCL.phate.markers.csv"))
+
+dat2
+
+```
+
+
+### 4.6.5 Plot DEGs
+```{r fig.width=8, fig.height=8}
+features <- c("TNFAIP3","FOS","JUNB","NFKBIA","HLA-DQA2","HLA-DRB5",
+              "EREG","CCL3","CCL4","CCL4L2","CTSL","SLC11A1",
+              "CXCL2","CXCL3","CXCL5","CXCL8","LILRB4","IGFBP2"
+              #"TREM2","SORL1","TMEM176A","TMEM176B","TNFAIP6"
+              )
+# CFB
+features <- c("TNFAIP3","FOS","JUNB",
+              "NFKBIA","EREG","CCL3",
+              "CCL4","CCL4L2","CXCL2",
+              "CXCL3","CXCL5","CXCL8"
+              )
+p7 <- suppressMessages(FeaturePlot(s,
+            reduction = "PHATE",
+            pt.size = 0.001,
+            ncol = 4,
+            #order = TRUE,
+            features = features) &
+  xlim(c(min(data.frame(s@reductions$PHATE@cell.embeddings)$PHATE_1),
+         max(data.frame(s@reductions$PHATE@cell.embeddings)$PHATE_1))) &
+  ylim(c(min(data.frame(s@reductions$PHATE@cell.embeddings)$PHATE_2),
+         max(data.frame(s@reductions$PHATE@cell.embeddings)$PHATE_2))) &
+  scale_color_gradientn(colours = inferno(256)) &
+    theme_minimal() &
+    theme(panel.border = element_blank(), 
+        panel.grid = element_blank(),
+        axis.text=element_blank(),
+        axis.title = element_blank(),
+        plot.title = element_text(size = 12, hjust=0.5, face="bold.italic"),
+        legend.key.size = unit(0.2, "cm"),
+        legend.text = element_text(size = 6),
+        legend.title = element_text(face="bold", size=12)))
+
+# CFN - antigen presentation
+features <- c("HLA-DQA2","HLA-DRB5","CTSL","LILRB4"#,"S100A6","S100A8","S100A10","S100A13"
+              )
+
+p8 <- suppressMessages(FeaturePlot(s,
+            reduction = "PHATE",
+            pt.size = 0.001,
+            ncol = 4,
+            #order = TRUE,
+            features = features) &
+  xlim(c(min(data.frame(s@reductions$PHATE@cell.embeddings)$PHATE_1),
+         max(data.frame(s@reductions$PHATE@cell.embeddings)$PHATE_1))) &
+  ylim(c(min(data.frame(s@reductions$PHATE@cell.embeddings)$PHATE_2),
+         max(data.frame(s@reductions$PHATE@cell.embeddings)$PHATE_2))) &
+  scale_color_gradientn(colours = inferno(256)) &
+    theme_minimal() &
+    theme(panel.border = element_blank(), 
+        panel.grid = element_blank(),
+        axis.text=element_blank(),
+        axis.title = element_blank(),
+        plot.title = element_text(size = 12, hjust=0.5, face="bold.italic"),
+        legend.key.size = unit(0.2, "cm"),
+        legend.text = element_text(size = 6),
+        legend.title = element_text(face="bold", size=12)))
+
+p7/p8
+```
+
+# 5 Save figures
+## 5.1 AM
+```{r}
+# celltype <- "AM"
+# out <- here("data","plots", celltype)
+# if(!dir.exists(out)) {
+#   dir.create(out,recursive = TRUE)
+# }
+# 
+# # umap split by Condition2
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 1600)
+# p1 +
+#   theme(plot.tag = element_text(size = 14, face = "bold"))
+# 
+# ggsave(plot=last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = paste0(out,"/","bal_",celltype,".umap.splitbyCondition2.jpeg"),
+#        height=3.5,
+#        width=10)
+# 
+# # selected dot plot
+# ## version 1: horizontal
+# suppressWarnings(print(p2 +
+#   theme(plot.tag = element_text(size = 14, face = "bold"
+#                                 ))))
+# 
+# ggsave(plot=last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = paste0(out,"/","bal_",celltype,".dotplot.jpeg"),
+#        height=7,
+#        width=4)
+# 
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 100)
+
+```
+
+## 5.2 AM-CCL
+```{r}
+# celltype <- "AM-CCL"
+# out <- here("data","plots",celltype)
+# if(!dir.exists(out)) {
+#   dir.create(out,recursive = TRUE)
+# }
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 1600)
+# 
+# # TRM-CCL violin plot
+# p3 +
+#   theme(plot.tag = element_text(size = 14, face = "bold"))
+# ggsave(plot=last_plot(), dpi=800, device="jpeg", limitsize = FALSE,
+#        width=10, height=4, file=paste0(out,"/","bal_",celltype,"plots","FigE2.jpeg"))
+# 
+# # PHATE plot
+# p4 +
+#   theme(plot.tag = element_text(size = 14, face = "bold"))
+# ggsave(last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = paste0(out,"/","AM-CCL.phate.density.jpeg"),
+#        height=4,
+#        width=8)
+# p5a +
+#   theme(plot.tag = element_text(size = 14, face = "bold"))
+# ggsave(last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = paste0(out,"/","AM-CCL.phate.condition.jpeg"),
+#        height=3,
+#        width=3)
+# 
+# p5b +
+#   theme(plot.tag = element_text(size = 14, face = "bold"))
+# ggsave(last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = paste0(out,"/","AML.phate.cellstate.jpeg"),
+#        height=3,
+#        width=3)
+# 
+# # proportion bar plot
+# p6 +
+#   theme(plot.tag = element_text(size = 14, face = "bold"))
+# ggsave(last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = paste0(out,"/","AM-CCL.barplot.jpeg"),
+#        height=2.5,
+#        width=2.5)
+# 
+# # AM-CCL dotplot
+# pt1
+# ggsave(last_plot(),filename=here("data","plots","AM-CCL","overlap.dotplot2.jpeg"),
+#        device="jpeg",dpi=1600,height=2.5, width=7.5)
+# 
+# 
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 100)
+```
+
+# 6 Save object
+```{r}
+celltype <- "AM"
+out <- here("data","SCEs","analysis",celltype,paste0("bal_",celltype,".analysis.SEU.qs"))
+if (!file.exists(out)) {
+  qsave(seu,file=out,nthreads=24)
+}
+
+celltype <- "AM-CCL"
+out <- here("data","SCEs","analysis",celltype,paste0("bal_",celltype,".analysis.SEU.qs"))
+if (!file.exists(out)) {
+  qsave(s,file=out,nthreads=16)
+}
+
+```
+
+# 7 Save annotation
+```{r}
+# 1) Write out annotations
+out_dir  <- here("output")
+out_file <- file.path(out_dir, "bal_AM_annotations.csv")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+ann <- tibble(
+  cell      = rownames(seu@meta.data),
+  sampleID  = seu$sampleID,
+  subtype   = as.character(seu$celltype)
+)
+
+readr::write_csv(ann, out_file)
+out_file
+
+```

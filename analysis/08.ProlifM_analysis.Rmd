@@ -1,0 +1,830 @@
+---
+title: 'Analysis of Proliferating macrophages (Prolif M)'
+author:
+- name: Anson Wong
+date: "`r Sys.Date()`"
+description: null
+output: html_document
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+xaringanExtra::use_panelset()
+
+```
+
+# 1 Load packages
+```{r}
+suppressPackageStartupMessages({
+library(Seurat)
+library(here)
+library(qs)
+library(forcats)
+library(pals)
+library(ggplot2)
+library(ggpubr)
+library(speckle)
+library(rstatix)
+library(scCustomize)
+library(patchwork)
+library(tidyverse)
+library(dplyr)
+library(Cepo)
+library(phateR)
+library(slingshot)
+library(tradeSeq)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(ReactomePA)
+library(readr)
+library(cowplot)
+library(harmony)
+library(scattermore)
+library(ggrastr)
+library(viridis)
+library(scater)
+library(circlize)
+library(ggplotify)
+library(ggh4x)
+library(tidyr)
+})
+set.seed(1990)
+
+```
+
+# 2 Annotation, integration, clustering, finding marker genes
+Cells annotated as TRM, Prolif M and RecM in the combined dataset were extracted for subclustering.
+RecM cluster was included for subclustering to aid a better TRM projection in UMAP, but they are not included for analysis here.
+Methods for normalization, integration, clustering and annotation were the same.
+
+For details, refer to code/bal_TRM.integration_clustering.R
+
+# 4 Analysis
+## 4.1 Read processed object
+```{r}
+out <- here("data","SCEs","analysis","Prolif_M.analysis.SEU.qs")
+
+if (!file.exists(out)) {
+  seu <- qread(here("data","SCEs","analysis","bal.SEU.qs"),nthreads=16)
+  s <- subset(seu, celltype=="Prolif M")
+  s$celltype <- fct_drop(s$celltype)
+  
+  DefaultAssay(s) <- "RNA"
+  
+  # split object by experiment
+  obj.list <- SplitObject(s, split.by="batchID")
+  
+  # normalization
+  obj.list <- lapply(X = obj.list, FUN = function(x) {
+    x <- SCTransform(x, vst.flavor = "v2", verbose=TRUE)
+  })
+  
+  # find most variable features across samples to integrate
+  var.features <- SelectIntegrationFeatures(object.list = obj.list, nfeatures=3000)
+  
+  # merge normalized samples
+  s <- merge(obj.list[[1]], y=obj.list[2:length(obj.list)], merge.data=TRUE)
+  
+  DefaultAssay(s) <- "SCT"
+  VariableFeatures(s) <- var.features
+  
+  # manually set variable features of merged Seurat object
+  s <- RunPCA(s)
+  s <- RunHarmony(s,
+                  group.by.vars=c("batchID"),
+                  reduction="pca",
+                  assay.use="SCT",
+                  reduction.save="harmony",
+                  plot_convergence=TRUE,
+                  .options = harmony_options(max.iter.cluster=50),
+                  max_iter=100)
+  s <- FindNeighbors(s, reduction="harmony", dims=1:30)
+  s <- FindClusters(s, resolution=1, algorithm=4, method="igraph")
+  s <- RunUMAP(s, reduction="harmony", dims=1:30)
+  
+  # cell cycle scoring
+  s <- CellCycleScoring(s, 
+                        g2m.features = cc.genes.updated.2019$g2m.genes, 
+                        s.features = cc.genes.updated.2019$s.genes)
+  qsave(s, file=out, nthreads=16)
+
+} else {
+  s <- qread(out, nthreads=16)
+  s$cc.phase <- ifelse(s$Phase == "G1", "G1", "S-G2M")
+  DefaultAssay(s) <- "RNA"
+  s <- NormalizeData(s)
+}
+
+
+# 1) Recode Condition2
+s$Condition2 <- recode(s$Condition2,
+  "HC"="C",    # rename HC → C
+  "CFB"="CFB",
+  "CFN"="CFN"
+)
+# now turn into a factor with your desired order
+s$Condition2 <- factor(s$Condition2, levels = c("C","CFB","CFN"))
+
+s$Condition <- recode(s$Condition,
+  "HC"="C",    # rename HC → C
+  "CF"="CF"
+)
+# now turn into a factor with your desired order
+s$Condition <- factor(s$Condition, levels = c("C","CF"))
+
+# 2) Rewrite ID strings
+s$ID <- s$ID %>%
+  # HC-01 → C-1, HC-02 → C-2, etc
+  sub("^HC-0*", "C-", .) %>%
+  # CF-B1 → CFB-1, CF-B2 → CFB-2, etc
+  sub("^CF-B", "CFB-", .) %>%
+  # CF-N1 → CFN-1, CF-N2 → CFN-2, etc
+  sub("^CF-N", "CFN-", .)
+
+# now set the exact levels you want
+new_id_levels <- c(
+  paste0("C-",   1:6),
+  paste0("CFB-", 1:8),
+  paste0("CFN-", 1:8)
+)
+s$ID <- factor(s$ID, levels = new_id_levels)
+
+
+```
+
+## 4.2 UMAP
+### 4.2.1 all UMAPs
+```{r fig.height=6, fig.width=8}
+Condition2.colours <- setNames(c("#26547c","#ef476f","#ffd166"),
+                               levels(s$Condition2))
+Condition.colours <- setNames(c("#26547c","#fb8b24"),
+                              levels(s$Condition))
+
+phase.colours <- setNames(c("#dd6e42","#e8dab2"),
+                          levels(s$cc.phase))
+
+(DimPlot(s, group.by = "Condition2", cols=Condition2.colours) |
+  DimPlot(s, group.by = "cc.phase", cols=phase.colours)) /
+  (DimPlot(s, group.by = "Condition",cols=Condition.colours) |
+  DimPlot(s, group.by = "SCT_snn_res.1", cols = brewer.dark2(10)))
+```
+
+### 4.2.2 UMAP coloured by phase
+```{r fig.height=3, fig.width=8}
+DimPlot(s, 
+        reduction = 'umap',
+        pt.size = 0.5,
+        label.box = FALSE,
+        label = FALSE, 
+        shuffle = TRUE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 4, 
+        cols=phase.colours,
+        group.by = "cc.phase") + #NoLegend() +
+  labs(x = NULL, y = NULL) + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_blank(),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text.align = 0,
+        legend.text = element_text(size = 12),
+        strip.text.x = element_text(face = "bold", vjust=2, size=16)) +
+  scale_color_manual(values = phase.colours) +
+  guides(
+    color = guide_legend(
+      override.aes = list(
+        size  = 5,    # make the points in the legend larger
+        shape = 15    # change the legend symbol shape if you like
+      )
+    )
+  ) -> pp1
+
+
+DimPlot(s, 
+        reduction = 'umap',
+        pt.size = 0.5,
+        label.box = FALSE,
+        label = FALSE, 
+        shuffle = TRUE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 4, 
+        cols=Condition2.colours,
+        group.by = "Condition2") + #NoLegend() +
+  labs(x = NULL, y = NULL) + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_blank(),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text.align = 0,
+        legend.text = element_text(size = 12),
+        strip.text.x = element_text(face = "bold", vjust=2, size=16)) +
+  scale_color_manual(values = Condition2.colours) +
+  guides(
+    color = guide_legend(
+      override.aes = list(
+        size  = 5,    # make the points in the legend larger
+        shape = 15    # change the legend symbol shape if you like
+      )
+    )
+  ) -> pp2
+
+pp1|pp2 -> p3
+p3
+```
+
+## 4.3 RecM vs AM signature
+### 4.3.1 Add module score
+```{r fig.width=5, fig.height=3}
+markers <- read.csv(here("data","Major.markers.csv"))
+
+am.genes   <- markers$AM[1:300]
+recm.genes <- markers$RecM[1:300]
+
+# 3. Add module scores
+s <- AddModuleScore(s,
+  features = list(AM = am.genes, RecM = recm.genes),
+  name     = c("AM_score", "RecM_score")
+)
+
+# → creates metadata columns "AM_score1" and "RecM_score1"
+
+# 3. pull out those scores
+scores_df <- FetchData(
+  object = s,
+  vars   = c("ID", "Condition2", "AM_score1", "RecM_score2")
+) %>%
+  tibble::rownames_to_column("cell") %>%
+  dplyr::rename(
+    AM_score   = AM_score1,
+    RecM_score = RecM_score2
+  )
+
+# 2. Pivot to long form
+long_df <- scores_df %>%
+  tidyr::pivot_longer(
+    cols      = c(AM_score, RecM_score),
+    names_to  = "signature",
+    values_to = "module_score"
+  )
+
+# 3. Pseudobulk by taking the mean per sample (ID) & signature
+pseudo_df <- long_df %>%
+  group_by(ID, Condition2, signature) %>%
+  summarise(
+    module_score = mean(module_score),
+    .groups      = "drop"
+  )
+
+```
+
+### 4.3.2 AM vs RecM signature within each group
+```{r fig.width=5, fig.height=2}
+# 1) Keep only IDs with both signatures
+pair_counts <- pseudo_df %>%
+  group_by(Condition2, ID) %>%
+  summarise(n = n(), .groups = "drop")
+
+pseudo_df2 <- pseudo_df %>%
+  semi_join(
+    filter(pair_counts, n == 2),
+    by = c("Condition2", "ID")
+  )
+
+pseudo_df2$signature <- factor(pseudo_df2$signature,
+                               levels = c("AM_score", "RecM_score"))
+
+pseudo_df2$Condition2 <- factor(pseudo_df2$Condition2,
+                               levels = c("C", "CFB", "CFN"))
+
+# 2) Run paired t‑tests per Condition2
+stat_df <- pseudo_df2 %>%
+  group_by(Condition2) %>%
+  pairwise_t_test(
+    module_score ~ signature,
+    paired           = TRUE,
+    id               = "ID",
+    p.adjust.method  = "BH"
+  ) %>%
+  add_xy_position(x = "signature", dodge = 0.8)
+
+# 3) Compute y‑positions for each Condition2
+lims <- pseudo_df2 %>%
+  group_by(Condition2) %>%
+  summarise(
+    y_max = max(module_score, na.rm = TRUE),
+    y_min = min(module_score, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+stat_df_wilcox <- pseudo_df2 %>%
+  group_by(Condition2) %>%
+  pairwise_wilcox_test(
+    module_score ~ signature,
+    paired           = TRUE,
+    id               = "ID",
+    p.adjust.method  = "BH"
+  ) %>%
+  add_xy_position(x = "signature", dodge = 0.8)
+
+# then plot exactly as before, but using the Wilcoxon stats
+ggplot(pseudo_df2, aes(x = signature, y = module_score, group = ID)) +
+  geom_line(color = "grey50", size = 0.3, alpha = 0.7) +
+  geom_point(aes(colour = signature), size = 1.5) +
+  facet_wrap(~ Condition2) +
+  stat_pvalue_manual(
+    stat_df_wilcox,
+    label        = "p.adj.signif",
+    tip.length   = 0.03,
+    bracket.size = 0.4,
+    hide.ns      = TRUE,
+    bracket.nudge.y = 0.02
+  ) +
+  scale_x_discrete(labels=c("AM","RecM")) +
+  scale_colour_manual(
+    name   = "Signature",
+    values = c(AM_score   = "#054a91",
+               RecM_score = "#dda15e"),
+    labels = c("AM", "RecM")
+  ) +
+  labs(x = NULL, y = "Module score") +
+  coord_cartesian(ylim = c(-0.1, 0.1)) +
+  theme_classic(base_size = 12) +
+  theme(
+    strip.text       = element_text(size = 10),
+    axis.title.x     = element_blank(),
+    axis.title.y     = element_text(size = 10),
+    axis.text.x      = element_text(size = 10),
+    axis.text.y      = element_text(size = 8),
+    axis.ticks.x     = element_blank(),
+    panel.border     = element_rect(color = "black", fill = NA, size = 0.5),
+    strip.background = element_rect(color = "black", fill = "white", size = 0.5),
+    axis.line.x      = element_blank(),
+    axis.line.y      = element_blank(),
+    legend.position  = "right",
+    legend.title     = element_blank(),
+    legend.text      = element_text(size = 10)
+  ) + NoLegend()
+```
+
+### 4.3.3 AM vs RecM signature within each group, separated by Cell Cycle Phase
+```{r fig.width=4, fig.height=3}
+# 1) Fetch & pseudobulk by ID × Condition2 × cc.phase × signature
+pseudo_df <- FetchData(
+  object = s,
+  vars   = c("ID", "Condition2", "cc.phase", "AM_score1", "RecM_score2")
+) %>%
+  rownames_to_column("cell") %>%
+  dplyr::rename(
+    AM_score   = AM_score1,
+    RecM_score = RecM_score2
+  ) %>%
+  pivot_longer(
+    cols      = c(AM_score, RecM_score),
+    names_to  = "signature",
+    values_to = "module_score"
+  ) %>%
+  group_by(ID, Condition2, cc.phase, signature) %>%
+  summarise(module_score = mean(module_score), .groups = "drop") %>%
+  # enforce factor order
+  mutate(
+    signature = factor(signature, levels = c("AM_score","RecM_score")),
+    Condition2 = factor(Condition2, levels = c("C","CFB","CFN")),
+    cc.phase   = factor(cc.phase,   levels = c("G1","S-G2M"))
+  )
+
+# 2) Paired Wilcoxon per phase × condition, BH‐adjusted
+stat_df <- pseudo_df %>%
+  group_by(cc.phase, Condition2) %>%
+  wilcox_test(
+    module_score ~ signature,
+    paired = TRUE
+  ) %>%
+  adjust_pvalue(method="BH", p.col="p", output.col="p.adj") %>%
+  add_significance("p.adj") %>%               # gives p.adj.signif
+  add_xy_position(x="signature", dodge = 0)    # dodge=0 for aligned
+
+# 3) Compute y‑positions by phase × condition
+lims <- pseudo_df %>%
+  group_by(cc.phase, Condition2) %>%
+  summarise(
+    y_max = max(module_score, na.rm = TRUE),
+    y_min = min(module_score, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+stat_df <- stat_df %>%
+  left_join(lims, by = c("cc.phase","Condition2")) %>%
+  group_by(cc.phase, Condition2) %>%
+  mutate(
+    y.position = y_max + (row_number()-1) * (y_max-y_min) * 0.1
+  ) %>%
+  ungroup()
+
+# 4) Plot: only lines + points, aligned, faceted by phase (rows) × condition (cols)
+ggplot(pseudo_df, aes(
+    x     = signature,
+    y     = module_score,
+    group = ID
+  )) +
+  # grey connecting lines
+  geom_line(
+    color = "grey50",
+    size  = 0.3,
+    alpha = 0.7
+  ) +
+  # coloured dots
+  geom_point(
+    aes(colour = signature),
+    size = 2
+  ) +
+  # facets: phase × condition
+  ggh4x::facet_grid2(
+    cc.phase ~ Condition2,
+    strip = ggh4x::strip_themed(
+      # column strips (Condition2)…
+      background_x = elem_list_rect(
+        fill = Condition2.colours
+      ),
+      # row strips (cc.phase)…
+      background_y = elem_list_rect(
+        fill = c("G1"    = "#dd6e42",
+                 "S-G2M" = "#e8dab2")
+      ),
+      # map each element to its own strip, not to layers
+      by_layer_x = FALSE,
+      by_layer_y = FALSE
+    )
+  ) +
+  # p‑value brackets
+  stat_pvalue_manual(
+    stat_df,
+    label        = "p.adj.signif",
+    tip.length   = 0.03,
+    bracket.size = 0.4,
+    hide.ns = TRUE,
+    bracket.nudge.y = 0.03,
+    vjust = 0
+  ) +
+  # manual colours & labels
+  scale_colour_manual(
+    name   = "Signature",
+    values = c(AM_score   = "#054a91",
+               RecM_score = "#dda15e"),
+    labels = c("AM","RecM")
+  ) +
+  scale_x_discrete(labels=c("AM","RecM")) +
+  labs(x = NULL, y = "Score") +
+  coord_cartesian(ylim = c(-0.1, 0.12)) +
+  theme_bw(base_size = 12) +
+  guides(
+    colour = guide_legend(
+      override.aes = list(size =3)   # points in legend
+    )
+  ) +
+  theme(
+    strip.text       = element_text(size = 10, colour="white", face="bold"),
+    axis.title.x     = element_blank(),
+    axis.title.y     = element_text(size=10),
+    axis.text.x      = element_text(size=10),
+    axis.text.y      = element_text(size=8),
+    #axis.ticks.x     = element_blank(),
+    panel.border     = element_rect(color = "black", fill = NA, size = 0.5),
+    strip.background = element_rect(color = "black", fill = "white", size = 0.5),
+    axis.line.x      = element_blank(),
+    axis.line.y      = element_blank(),
+    legend.position  = "right",
+    legend.title     = element_text(size=11),
+    legend.text      = element_text(size=10)
+  ) + NoLegend() -> p2
+p2
+```
+
+## 4.4 Other plots
+### 4.4.1 feature plot of markers
+```{r fig.width=9, fig.height=9}
+FeaturePlot(s, features = c("SPP1","CHI3L1","MERTK","MMP9","PLA2G7","GPNMB","TGFBI","CD36",
+                            "MMP19"), 
+            #order = TRUE,
+            cols=brewer.reds(9)[2:9])
+```
+
+### 4.4.2 Kernal density of cell cycle phase
+```{r fig.height=2, fig.width=4}
+s$Harmony.UMAP1 <- s@reductions$umap@cell.embeddings[,1]
+s$Harmony.UMAP2 <- s@reductions$umap@cell.embeddings[,2]
+s$CellID <- rownames(s@meta.data)
+
+get_density <- function(x, y, ...) {
+  dens <- MASS::kde2d(x, y, ...)
+  ix <- findInterval(x, dens$x)
+  iy <- findInterval(y, dens$y)
+  ii <- cbind(ix, iy)
+  return(dens$z[ii])
+}
+
+
+dens.umap.list <- list()
+loop.cells <- levels(factor(s$cc.phase))
+
+for(i in seq_along(loop.cells)){
+    i.c <- loop.cells[i]
+    # change this to 1% of all cells
+    i.n <- ceiling(sum(s$cc.phase %in% i.c)/100)
+    if(i.n < 100){
+      i.n <- 100
+    }
+    i.dens <- get_density(s$Harmony.UMAP1[s$cc.phase %in% i.c],
+                          s$Harmony.UMAP2[s$cc.phase %in% i.c], n=i.n)
+    
+    dens.umap.list[[i.c]] <- data.frame("cc.phase"=i.c,
+                                        "CellID"=s$CellID[s$cc.phase %in% i.c],
+                                        "Dens"=i.dens)
+}
+
+umap.dens <- do.call(rbind.data.frame, dens.umap.list)
+umap.dens.merge <- base::merge(s@meta.data, umap.dens, by=c('cc.phase', 'CellID'))
+
+
+phase.order <- c("G1","S-G2M")
+title.list <- setNames(phase.order,
+                       phase.order)
+pt.list <- list()
+for(x in seq_along(phase.order)){
+  x.c <- phase.order[x]
+  
+  p <- ggplot(umap.dens.merge,
+         aes(x=Harmony.UMAP1, y=Harmony.UMAP2)) +
+    geom_scattermore(data=umap.dens.merge[, c("Harmony.UMAP1", "Harmony.UMAP2")],
+                     colour='#adb5bd',) +
+    geom_point_rast(data=umap.dens.merge[umap.dens.merge$cc.phase %in% x.c, ],
+                    aes(colour=Dens), size=0.001) +
+    scale_colour_viridis() +
+    labs(title=title.list[x.c], x="UMAP1", y="UMAP2") +
+    theme_cowplot() +
+    guides(colour=guide_colourbar(title="Density")) +
+    theme(plot.title=element_text(size=8,hjust=0.5,face="plain"),
+          legend.key.size = unit(0.2, "cm"),
+          axis.text=element_blank(),
+          axis.title=element_blank(),
+          axis.line = element_blank(),
+          axis.ticks=element_blank(),
+          legend.title=element_text(size=6),
+          legend.text=element_blank())
+    pt.list[[x.c]] <- p
+}
+
+
+p4 <- pt.list[[1]] + pt.list[[2]]
+p4
+
+```
+
+### 4.4.3 Kernal density of marker genes
+#### 4.4.3.1 Define function
+```{r}
+# helper to compute 2D density at each (x,y)
+get_density <- function(x, y, n = 100, ...) {
+  dens <- MASS::kde2d(x, y, n = n, ...)
+  ix   <- findInterval(x, dens$x)
+  iy   <- findInterval(y, dens$y)
+  dens$z[cbind(ix, iy)]
+}
+
+plot_marker_density <- function(
+  seurat_obj,
+  markers,
+  umap1 = "Harmony.UMAP1",
+  umap2 = "Harmony.UMAP2",
+  cellid = "CellID",
+  min_grid = 100
+) {
+  # 0) pull & augment metadata
+  meta <- seurat_obj@meta.data
+  if (!cellid %in% colnames(meta)) {
+    meta[[cellid]] <- rownames(meta)
+  }
+  
+  # 1) add “_pos” columns for each gene
+  for (g in markers) {
+    expr_vals <- FetchData(seurat_obj, vars = g)[[g]]
+    meta[[paste0(g, "_pos")]] <- expr_vals > 0
+  }
+  
+  # 2) compute densities per marker
+  dens_list <- vector("list", length(markers))
+  names(dens_list) <- markers
+  
+  for (g in markers) {
+    flag_col <- paste0(g, "_pos")
+    cells    <- which(meta[[flag_col]])
+    grid_n   <- max(ceiling(length(cells) / min_grid), min_grid)
+    
+    dens_vals <- get_density(
+      meta[[umap1]][cells],
+      meta[[umap2]][cells],
+      n = grid_n
+    )
+    
+    dens_list[[g]] <- data.frame(
+      CellID = meta[[cellid]][cells],
+      Marker = g,
+      Dens   = dens_vals,
+      stringsAsFactors = FALSE
+    )
+  }
+  
+  dens_df <- do.call(rbind, dens_list)
+  
+  # merge back onto metadata
+  meta2 <- merge(meta, dens_df, by = cellid)
+  
+  # 3) prepare bare‐UMAP background
+  umap_all <- data.frame(
+    Harmony.UMAP1 = meta[[umap1]],
+    Harmony.UMAP2 = meta[[umap2]]
+  )
+  
+  # 4) build label expressions, e.g. italic(GENE)+
+  lab_expr <- lapply(markers, function(m)
+    bquote(italic(.(m))^"+")
+  )
+  names(lab_expr) <- markers
+  
+  # 5) loop to make one plot per marker
+  plots <- lapply(markers, function(g) {
+    ggplot() +
+      # all cells in grey
+      geom_scattermore(
+        data   = umap_all,
+        aes(x = Harmony.UMAP1, y = Harmony.UMAP2),
+        colour = "#adb5bd"
+      ) +
+      # positives coloured by density
+      geom_point_rast(
+        data = meta2[meta2$Marker == g, ],
+        aes_string(x = umap1, y = umap2, colour = "Dens"),
+        size = 0.001
+      ) +
+      scale_colour_viridis() +
+      labs(title = lab_expr[[g]], x = "UMAP1", y = "UMAP2") +
+      theme_cowplot() +
+      theme(
+        plot.title      = element_text(size = 12, hjust = 0.5, face = "plain"),
+        legend.key.size = unit(0.2, "cm"),
+        axis.text       = element_blank(),
+        axis.title      = element_blank(),
+        axis.line       = element_blank(),
+        axis.ticks      = element_blank(),
+        legend.title    = element_text(size = 6),
+        legend.text     = element_blank()
+      )
+  })
+  
+  # name the list by gene for easy indexing
+  names(plots) <- markers
+  return(plots)
+}
+
+
+```
+
+#### 4.4.3.2 Plot
+```{r fig.width=6, fig.height=3.5}
+markers <- c("VCAN","FABP4","CCL2","CXCL8","SPP1","PLA2G7")
+pt.list <- plot_marker_density(s, markers)
+
+(pt.list[["VCAN"]] + pt.list[["FABP4"]] + pt.list[["CCL2"]]) / 
+  (pt.list[["CXCL8"]] + pt.list[["SPP1"]] + pt.list[["PLA2G7"]]) -> p4
+
+p4
+```
+
+
+# 5 Save figures
+```{r}
+celltype <- "ProlifM"
+out <- here("output","plots",celltype)
+if(!dir.exists(out)) {
+  dir.create(out,recursive = TRUE)
+}
+
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 1600)
+
+
+# # cc phase proportion
+# p1 +
+#   theme(plot.tag = element_text(size = 14, face = "bold"))
+# 
+# ggsave(plot=last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = paste0(out,"/","bal_",celltype,".ccphase.prop.jpeg"),
+#        height=2,
+#        width=6)
+
+# paired T test of RecM signature
+p2 +
+  theme(plot.tag = element_text(size = 14, face = "bold"))
+
+ggsave(plot=last_plot(),
+       device="jpeg",
+       dpi=1600,
+       filename = paste0(out,"/","bal_",celltype,".signature_pairedTtest.jpeg"),
+       height=3,
+       width=4)
+
+# umap
+p3 +
+  theme(plot.tag = element_text(size = 14, face = "bold"))
+
+ggsave(plot=last_plot(),
+       device="jpeg",
+       dpi=1600,
+       filename = paste0(out,"/","bal_",celltype,".umap.jpeg"),
+       height=3,
+       width=8)
+
+# density plot
+p4 +
+  theme(plot.tag = element_text(size = 14, face = "bold"))
+
+ggsave(plot=last_plot(),
+       device="jpeg",
+       dpi=1600,
+       filename = paste0(out,"/","bal_",celltype,".markerDensity.jpeg"),
+       height=3.5,
+       width=6)
+
+# # dot plot
+# p5 +
+#   theme(plot.tag = element_text(size = 14, face = "bold"))
+# 
+# ggsave(plot=last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = paste0(out,"/","bal_",celltype,".DE.dotplot.jpeg"),
+#        height=2.5,
+#        width=8)
+# 
+# p5 + NoLegend() +
+#   theme(plot.tag = element_text(size = 14, face = "bold"))
+# 
+# ggsave(plot=last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = paste0(out,"/","bal_",celltype,".DE.dotplot_NoLegend.jpeg"),
+#        height=1.8,
+#        width=6)
+
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 100)
+
+```
+
+# 6 Save raw data
+```{r}
+# correlation to pc1
+stat_df %>% as.data.frame() %>% WriteXLS::WriteXLS(here("output","ProlifM_module_stat.xlsx"))
+
+write_summary_xlsx <- function(pseudo_df, file = "cyt_summary.xlsx") {
+  library(dplyr)
+  library(writexl)
+
+  out <- pseudo_df %>%
+    # remove suffix so "AM_score" -> "AM", "RecM_score" -> "RecM"
+    mutate(signature = sub("_score$", "", signature)) %>%
+    group_by(cc.phase, Condition2, signature) %>%
+    summarise(
+      `Min value`    = quantile(module_score, probs = 0,    na.rm = TRUE),
+      `1st Quatile`  = quantile(module_score, probs = 0.25, na.rm = TRUE),
+      `Median`       = quantile(module_score, probs = 0.5,  na.rm = TRUE),
+      `3rd Quatile`  = quantile(module_score, probs = 0.75, na.rm = TRUE),
+      `Max value`    = quantile(module_score, probs = 1,    na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    # rename to the exact column headers you requested
+    rename(
+      `Cell cycle phase` = cc.phase,
+      `Study group`      = Condition2,
+      `Gene set`         = signature
+    )
+
+  writexl::write_xlsx(list(Summary = out), path = file)
+  invisible(out)
+}
+
+write_summary_xlsx(pseudo_df = pseudo_df,file = here("output","ProlifM_module.xlsx"))
+
+pseudo_df %>% data.frame() %>% write_csv(here("output","Fig5B.csv"))
+```

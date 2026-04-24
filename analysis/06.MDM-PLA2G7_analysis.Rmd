@@ -1,0 +1,1051 @@
+---
+title: 'Analysis of the profibrotic RecM (MDM-PLA2G7) cluster'
+author:
+- name: Anson Wong
+date: "`r Sys.Date()`"
+description: null
+output: html_document
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+xaringanExtra::use_panelset()
+
+```
+
+# 1 Load packages
+```{r}
+suppressPackageStartupMessages({
+library(Seurat)
+library(here)
+library(qs)
+library(forcats)
+library(pals)
+library(ggplot2)
+library(ggpubr)
+library(speckle)
+library(rstatix)
+library(scCustomize)
+library(patchwork)
+library(dplyr)
+library(ComplexHeatmap)
+library(DOSE)
+library(circlize)
+library(tibble)
+library(RColorBrewer)
+library(ggplotify)
+library(ensembldb)
+library(Homo.sapiens)
+library(msigdbr)
+library(AnnotationHub)
+library(scuttle)
+library(fgsea)
+library(dendsort)
+library(readxl)
+library(scattermore)
+library(chroma)
+library(cowplot)
+library(ggrastr)
+library(data.table)
+library(gridExtra)
+library(purrr)
+library(readr)
+library(data.table)
+})
+set.seed(1990)
+
+```
+
+# 2 Prepare reference object
+## 2.1 Load object
+```{r}
+# load analysis object
+celltype <- "RecM"
+seu <- qread(here("data","SCEs","analysis",celltype,paste0("bal_",celltype,".analysis.SEU.qs")),
+             nthreads=16)
+```
+
+## 2.2 Prepare object
+```{r}
+# rename and extract metatdata
+seu$orig.ident <- "CF paed"
+metadata <- seu@meta.data[,c("orig.ident","nCount_RNA","nFeature_RNA","Age","Sex",
+                     "batchID","subtype","Condition2","ID")]
+colnames(metadata)
+colnames(metadata) <- c("orig.ident","nCount_RNA","nFeature_RNA","age","sex",
+                        "batchID","orig.celltype","condition","sample")
+
+seu.ref <- CreateSeuratObject(seu@assays$RNA@counts, meta.data = metadata)
+
+```
+
+## 2.3 Set up colours
+```{r}
+subtype.colours <- setNames(c("#f2cc8f","#7209b7","#83c5be","#3a6ea5","#9e2a2b","#9c6644","#9a8c98"),
+                            c("Mono","MDM-IV","MDM-FABP4lo","MDM-FABP4hi","MDM-inflam","MDM-PLA2G7hi","IM"))
+
+Condition2.colours <- setNames(c("#26547c","#ef476f","#ffd166"),
+                               c("C","CFB","CFN"))
+```
+
+
+# 3 Prepare public objects
+## 3.1 Prepare ensembl v98 database
+```{r}
+ah <- AnnotationHub(cache="/group/canc2/anson/.cache/R/AnnotationHub", ask=FALSE)
+EnsDb.Hsapiens.v98 <- query(ah, c("EnsDb", "Homo Sapiens", 98))[[1]]
+```
+
+## 3.2 Wendisch et al. dataset
+```{r}
+# load object
+seu.wendisch <- qread(here("data","public_datasets","wendisch","SCEs","wendisch.SEU.qs"),nthreads=16)
+
+wendisch.celltype <- c("Monocytes","Mono/Mφ","CD163/LGMN-Mφ")
+# select columns from metadata
+metadata <- seu.wendisch@meta.data %>%
+  dplyr::mutate(orig.ident="Wendisch") %>%
+  dplyr::mutate(batchID="Wendisch") %>%
+  dplyr::mutate(condition="Covid") %>%
+  dplyr::select(orig.ident, nCount_RNA, nFeature_RNA, age, sex,
+                batchID, Cluster, condition, patient)
+colnames(metadata)
+colnames(metadata) <- c("orig.ident","nCount_RNA","nFeature_RNA","age","sex",
+                        "batchID","orig.celltype","condition","sample")
+metadata$orig.ident <- "Wendisch"
+
+# match gene ID
+ensdb_columns <- setNames(c("GENEBIOTYPE", "SEQNAME","SYMBOL"),
+                          paste0("ENSEMBL.",
+                                 c("GENEBIOTYPE", "SEQNAME","SYMBOL")))
+stopifnot(all(ensdb_columns %in% columns(EnsDb.Hsapiens.v98)))
+
+ensdb_df <- DataFrame(
+  lapply(ensdb_columns, function(column) {
+    mapIds(
+      x = EnsDb.Hsapiens.v98,
+      keys = rownames(seu.wendisch@assays$RNA@counts),
+      keytype = "GENEID",
+      column = column,
+      multiVals = "first")
+  }),
+  row.names = rownames(seu.wendisch@assays$RNA@counts))
+
+# make feature names unique
+counts <- seu.wendisch@assays$RNA@counts
+rownames(counts) <- uniquifyFeatureNames(rownames(ensdb_df), ensdb_df$ENSEMBL.SYMBOL)
+
+# Create new object
+seu.wendisch.backup <- seu.wendisch
+seu.wendisch <- CreateSeuratObject(counts, meta.data = metadata)
+seu.wendisch <- subset(seu.wendisch, orig.celltype %in% wendisch.celltype)
+
+```
+
+## 3.3 Li et al. dataset
+```{r}
+# Load objects
+seu.li <- qread(here("data","public_datasets","li","SCEs","li.SEU.qs"),nthreads=16)
+li.celltype <- c("Mono","FOLR2.IMs","SPP1.IMs")
+
+# select columns from metadata
+metadata <- seu.li@meta.data %>%
+  dplyr::mutate(batchID="Li") %>%
+  dplyr::mutate(orig.ident="Li") %>%
+  dplyr::mutate(age="unknown") %>%
+  dplyr::mutate(sex="unknown") %>%
+  dplyr::mutate(sample=seu.li$orig.ident) %>%
+  dplyr::mutate(condition=seu.li$orig.treatment) %>%
+  dplyr::select(orig.ident, nCount_RNA, nFeature_RNA, age, sex,
+                batchID, Cell.Types, orig.treatment, sample)
+colnames(metadata)
+colnames(metadata) <- c("orig.ident","nCount_RNA","nFeature_RNA","age","sex",
+                        "batchID","orig.celltype","condition","sample")
+
+# match gene ID
+ensdb_columns <- setNames(c("GENEBIOTYPE", "SEQNAME","GENEID"),
+                          paste0("ENSEMBL.",
+                                 c("GENEBIOTYPE", "SEQNAME", "GENEID")))
+stopifnot(all(ensdb_columns %in% columns(EnsDb.Hsapiens.v98)))
+
+ensdb_df <- DataFrame(
+  lapply(ensdb_columns, function(column) {
+    mapIds(
+      x = EnsDb.Hsapiens.v98,
+      keys = rownames(seu.li@assays$RNA@counts),
+      keytype = "SYMBOL",
+      column = column,
+      multiVals = "first")
+  }),
+  row.names = rownames(seu.li@assays$RNA@counts))
+
+# make feature names unique
+counts <- seu.li@assays$RNA@counts
+rownames(counts) <- uniquifyFeatureNames(ensdb_df$ENSEMBL.GENEID, rownames(ensdb_df))
+
+# Create new object
+seu.li.backup <- seu.li
+seu.li <- CreateSeuratObject(counts, meta.data = metadata)
+seu.li <- subset(seu.li, orig.celltype %in% li.celltype)
+seu.li$orig.celltype <- fct_drop(seu.li$orig.celltype)
+
+```
+
+# 4 Merge and save objects
+```{r}
+dim(seu.ref)
+dim(seu.wendisch)
+dim(seu.li)
+
+# merge objects
+seu <- merge(seu.ref, y=list(seu.wendisch,seu.li))
+dim(seu)
+
+# check number of cells per batch
+seu$batchID <- factor(seu$batchID)
+summary(seu$batchID)
+
+if (!dir.exists(here("data","public_datasets","SCEs"))) {
+  dir.create(here("data","public_datasets","SCEs"),recursive=TRUE)
+}
+
+out <- here("data","public_datasets","SCEs","public.processed.SEU.qs")
+if (!file.exists(out)) {
+  qsave(seu, file=out, nthreads=16)
+}
+
+```
+
+# 5 Normalization, integration, clustering
+For details, see code/bal_RecM.public_integration_clustering.R
+
+# 6 Analysis
+## 6.1 Gene set module score
+Gene sets from 4 studies were selected:
+- Li et al. 2022 [CF]
+- Wendisch et al. 2021 [COVID-19]
+- Liao et al. 2020 [COVID-19]
+- Morrell et al. 2023 [AHRF]
+
+### 6.1.1 Prepare gene sets
+```{r}
+# Present
+present.markers <- read.csv(here("data","RecM.markers.csv"))[,"MDM.PLA2G7hi"]
+
+# Li et al. 2022 [CF]
+li.markers <- read_excel(here("data","public_datasets","li","inline-supplementary-material-2.xls"))
+head(li.markers)
+
+li.genesets <- 
+  li.markers %>%
+  dplyr::filter(cluster=="SPP1.IMs") %>%
+  dplyr::select(gene) %>% unlist(use.names = FALSE)
+
+# Wendisch et al. 2021 [Covid]
+wendisch.genesets <- c("MARCKS","CD84","RAP2B","TMEM37","OLFML2B",
+                       "MERTK","TTYH3","GPNMB","LGMN","RGL1",
+                       "BLVRB","CTSB","NPL","TPCN1","CMKLR1",
+                       "CD163","ABCA1","MAF","FPR3","PSAP",
+                       "A2M","MPP1","GALM","LHFPL2","PLTP",
+                       "BCAT1","SDC3","RNASE1","SLC36A1","FNIP2",
+                       "PLXNC1","PMP22","RNF130","ETV5","MFSD1",
+                       "MS4A6A","SDS","MAFB","CREG1","ADAM9",
+                       "LIPA","BASP1","CPM","PLA2G7","AP2A2",
+                       "ADAP2","CTSL","IL10","ADORA3","HM13")
+
+# Liao et al. 2020 [Covid]
+liao.markers <- read_excel(here("data","public_datasets","liao","Liao_tableS5.xlsx"))
+head(liao.markers)
+
+liao.genesets <-
+  liao.markers %>%
+  dplyr::filter(cluster=="Group3") %>%
+  dplyr::select(gene) %>% unlist(use.names = FALSE)
+
+# Morrell et al. 2023
+morrell.markers <- read_excel(here("data","public_datasets","morrell","Morrell_tableS5.xlsx"))
+head(morrell.markers)
+
+morrell.genesets <- 
+  morrell.markers %>% 
+  data.frame() %>%
+  dplyr::select(Cluster.0, Cluster.6) %>% unlist(use.names = FALSE)
+
+gene.sets <- list("Present"=head(present.markers,50),
+                  "Li"=head(li.genesets,50),
+                  "Wendisch"=wendisch.genesets,
+                  "Liao"=head(liao.genesets,50),
+                  "Morrell"=morrell.genesets)
+```
+
+
+### 6.1.2 Calculate gene set module score
+```{r fig.width=15, fig.height=6}
+seu.orig <- qread(here("data","SCEs","analysis",celltype,paste0("bal_",celltype,".analysis.SEU.qs")),
+             nthreads=16)
+seu.orig <- AddModuleScore(seu.orig, gene.sets)
+
+min.score <- min(unlist(seu.orig@meta.data[,paste0("Cluster",1:5)],use.names = FALSE))
+max.score <- max(unlist(seu.orig@meta.data[,paste0("Cluster",1:5)],use.names = FALSE))
+
+subtype.labels <- c("Mono","MDM-IV",
+                    expression('MDM-'*italic('FABP4')^'lo'),expression('MDM-'*italic('FABP4')^'hi'),
+                    "MDM-inflam",expression('MDM-'*italic('PLA2G7')^'hi'),
+                    "IM")
+
+# feature plot of module score
+title.list <- list(Cluster1=expression("Present study"),
+                   Cluster2=expression("Li"*italic(' et al.')),
+                   Cluster3=expression("Wendisch"*italic(' et al.')),
+                   Cluster4=expression("Liao"*italic(' et al.')),
+                   Cluster5=expression("Morrell"*italic(' et al.')))
+
+p1 <- FeaturePlot(seu.orig, c(paste0("Cluster",1:5)),
+            slot = "data",
+            #keep.scale = "feature",
+            ncol = 5,
+            order = TRUE,
+            raster=FALSE,
+            pt.size =0.1) & 
+  scale_colour_gradientn(colours = rev(brewer.rdylbu(11)),
+                         limits = c(min.score, max.score), 
+                         breaks = c(-0.5,0,0.5,1),
+                         labels=c(-0.5,0,0.5,1)) &
+  #NoLegend() &
+  labs(x = NULL, y = NULL) &
+  guides(x = "none", y = "none") &
+  theme(plot.title = element_blank(),
+        text=element_text(family="Arial"),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(size=10),
+        legend.text = element_text(size = 8),
+        legend.key.size = unit(0.1,"inch"),
+        strip.text.x = element_text(face = "bold", vjust=2, size=12))
+
+# violin plot of module score per subtype
+
+pt1.list <- list()
+for (cluster in paste0("Cluster",1:5)) {
+  p <- ggplot(seu.orig@meta.data, aes(x=subtype,y=!! sym(cluster))) +
+        geom_jitter(mapping=aes(color = !! sym(cluster), alpha=0.5)) +
+        geom_hline(yintercept = mean(unlist(seu.orig@meta.data[,cluster])),col = "#495057", size=1) +
+        geom_violin(mapping=aes(fill=subtype)) +
+        scale_fill_manual(values=subtype.colours) +
+        scale_x_discrete(label=subtype.labels) +
+        scale_colour_gradientn(colours = rev(brewer.rdylbu(11))) +
+        theme_classic() +
+        labs(#title=title.list[[cluster]],
+          title=NULL,
+             x = NULL, y = "Score") +
+        scale_y_continuous(limit=c(-0.5,1.2),breaks=c(-0.5,0,0.5,1),labels=c(-0.5,0,0.5,1)) +
+        theme(plot.title = element_text(hjust = 0.5),
+              #text=element_text(family="Arial"),
+              axis.text.x = element_text(angle=45, vjust=1, hjust=1, size=10),
+              #axis.ticks.x = element_blank(),
+              axis.text.y= element_text(colour="black"),
+              axis.title.y=element_text(vjust=-1,
+                                        size=10),
+              axis.title.x=element_blank(),
+              legend.text = element_text(size = 10),
+              strip.text.x = element_text(face = "bold", vjust=2, size=12)) +
+        NoLegend()
+  pt1.list[[cluster]] <- p
+}
+
+p1 <- p1/(pt1.list[[1]] | pt1.list[[2]] | pt1.list[[3]] | pt1.list[[4]] | pt1.list[[5]])
+p1
+```
+
+### 6.1.3 One-sided wilcoxon test
+```{r}
+seu_md <- seu.orig@meta.data
+clusters <- paste0("Cluster", 1:5)
+
+# Define mapping for cluster → Reference label
+ref_labels <- c(
+  "Cluster1" = "Present",
+  "Cluster2" = "Li",
+  "Cluster3" = "Wendisch",
+  "Cluster4" = "Liao",
+  "Cluster5" = "Morrell"
+)
+
+tests <- map_dfr(clusters, function(cl) {
+  seu_md %>%
+    wilcox_test(
+      reformulate("subtype", response = cl),
+      ref.group = "all",
+      alternative = "less",
+      exact = TRUE,
+      p.adjust.method = "BH",
+      detailed = TRUE
+    ) %>%
+    mutate(
+      Reference = ref_labels[[cl]],
+      `-log10_p` = ifelse(
+        is.infinite(-log10(p)),
+        ">300",
+        as.character(-log10(p))
+      ),
+      `-log10_p.adj` = ifelse(
+        is.infinite(-log10(p.adj)),
+        ">300",
+        as.character(-log10(p.adj))
+      )
+    )
+})
+tests %>% as.data.frame() %>% write.csv(file=here("output","Fig3A.stat.csv"))
+
+df <- split(seu.orig@meta.data, seu.orig$subtype)
+
+# Present
+stat.test1 <- seu.orig@meta.data %>%
+  wilcox_test(Cluster1 ~ subtype,
+              ref.group = "all",
+              alternative="less",
+              exact=TRUE,
+              p.adjust.method = "BH",
+              detailed = TRUE)
+
+-log10(stat.test1$p.adj)
+
+# Li
+stat.test2 <- seu.orig@meta.data %>%
+  wilcox_test(Cluster2 ~ subtype,
+              ref.group = "all",
+              alternative="less",
+              exact=TRUE,
+              p.adjust.method = "BH",
+              detailed = TRUE)
+
+-log10(stat.test2$p.adj)
+
+# Wendisch
+stat.test3 <- seu.orig@meta.data %>%
+  wilcox_test(Cluster3 ~ subtype,
+              ref.group = "all",
+              alternative="less",
+              exact=TRUE,
+              p.adjust.method = "BH",
+              detailed = TRUE)
+
+-log10(stat.test3$p.adj)
+
+# Liao
+stat.test4 <- seu.orig@meta.data %>%
+  wilcox_test(Cluster4 ~ subtype,
+              ref.group = "all",
+              alternative="less",
+              exact=TRUE,
+              p.adjust.method = "BH",
+              detailed = TRUE)
+
+-log10(stat.test4$p.adj)
+
+# Morrell
+stat.test5 <- seu.orig@meta.data %>%
+  wilcox_test(Cluster5 ~ subtype,
+              ref.group = "all",
+              alternative="less",
+              exact=TRUE,
+              p.adjust.method = "BH",
+              detailed = TRUE)
+
+-log10(stat.test5$p.adj)
+
+write.csv(stat.test1 %>% data.frame(), file=here("output","Present.stat.csv"))
+write.csv(stat.test2 %>% data.frame(), file=here("output","Li.stat.csv"))
+write.csv(stat.test3 %>% data.frame(), file=here("output","Wendisch.stat.csv"))
+write.csv(stat.test4 %>% data.frame(), file=here("output","Liao.stat.csv"))
+write.csv(stat.test5 %>% data.frame(), file=here("output","Morrell.stat.csv"))
+
+# write statistics
+setDT(seu.orig@meta.data)
+#seu.orig@meta.data[, as.list(summary(dt)), by = subtype]
+
+tapply(seu.orig@meta.data$Cluster1, seu.orig@meta.data$subtype,summary) %>% data.frame() %>% apply(2,as.character) %>% write.csv(file=here("output","Fig3A.stat.csv"))
+
+# write summary
+# Start from meta
+md <- as.data.table(seu.orig@meta.data)
+
+# 1) Create a canonical group2 column
+if (!"group2" %in% names(md)) {
+  if ("Condition2" %in% names(md)) {
+    md[, group2 := as.character(Condition2)]
+  } else if ("subtype" %in% names(md)) {
+    md[, group2 := as.character(subtype)]
+  } else {
+    stop("No grouping column found: expected one of group2 / Condition2 / subtype.")
+  }
+}
+md[, group2 := trimws(group2)]
+
+# 2) Reference mapping
+ref_labels <- c(
+  "Cluster1" = "Present",
+  "Cluster2" = "Li",
+  "Cluster3" = "Wendisch",
+  "Cluster4" = "Liao",
+  "Cluster5" = "Morrell"
+)
+cols <- paste0("Cluster", 1:5)
+
+# 3) Long → add Reference → drop cluster → summary by (Reference, group2)
+summ_dt <- melt(
+  md,
+  id.vars = "group2",
+  measure.vars = cols,
+  variable.name = "cluster",
+  value.name = "value"
+)[, `:=`(
+  Reference = ref_labels[cluster]
+)][, c("cluster") := NULL
+][, as.list(summary(value)), by = .(Reference, group2)]
+
+# 4) Order: Reference then group2 (CFN, CFB, C)
+ref_order   <- c("Present", "Li", "Wendisch", "Liao", "Morrell")
+group_order <- c("CFN", "CFB", "C")
+
+summ_dt[, Reference := factor(Reference, levels = ref_order)]
+summ_dt[, group2    := factor(group2,    levels = group_order)]
+setorder(summ_dt, Reference, group2)
+
+# 5) Write out as Fig3A.stat.csv
+fwrite(summ_dt, here::here("output", "Fig3A_summary.csv"))
+
+```
+
+```{r}
+# meta as data.table
+md <- as.data.table(seu.orig@meta.data)
+
+# RecM subset column (use the one you used in wilcox: 'subtype')
+if (!"subtype" %in% names(md)) stop("Expected column 'subtype' not found for RecM subset.")
+
+# Map cluster → Reference labels
+ref_labels <- c(
+  "Cluster1" = "Present",
+  "Cluster2" = "Li",
+  "Cluster3" = "Wendisch",
+  "Cluster4" = "Liao",
+  "Cluster5" = "Morrell"
+)
+
+# clusters to include
+clusters <- paste0("Cluster", 1:5)
+
+# desired output orders
+ref_order    <- c("Present", "Li", "Wendisch", "Liao", "Morrell")
+subset_order <- c("Mono","MDM-IV","MDM-FABP4lo","MDM-FABP4hi","MDM-inflam","MDM-PLA2G7hi","IM")
+
+## --- 1) Per-(Reference × RecM subset) summaries -------------------------
+
+# Long table of all cluster values, tagged with Reference
+long_dt <- melt(
+  md,
+  id.vars = "subtype",
+  measure.vars = clusters,
+  variable.name = "cluster",
+  value.name = "value"
+)[, `:=`(Reference = ref_labels[cluster])][, cluster := NULL][]
+
+# Summaries (Min, 1st Qu., Median, Mean, 3rd Qu., Max) by Reference × subset
+summ_dt <- long_dt[
+  , as.list(summary(value)), by = .(Reference, subtype)
+]
+
+# Rename to match your exact headers
+setnames(
+  summ_dt,
+  old = c("subtype", "Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max."),
+  new = c("RecM subset", "Min", "1st Quatile", "Median", "Mean", "3rd Quatile", "Max value")
+)
+
+## --- 2) Wilcoxon tests per cluster (Reference) vs 'all' by subtype ------
+
+seu_md <- seu.orig@meta.data  # tibble/data.frame for rstatix
+
+tests <- map_dfr(clusters, function(cl) {
+  seu_md %>%
+    wilcox_test(
+      reformulate("subtype", response = cl),
+      ref.group = "all",
+      alternative = "less",
+      exact = TRUE,
+      p.adjust.method = "BH",
+      detailed = TRUE
+    ) %>%
+    mutate(
+      Reference = ref_labels[[cl]],
+      `-log10(p)` = ifelse(is.infinite(-log10(p)), ">300", as.character(-log10(p))),
+      `-log10(p.adj)` = ifelse(is.infinite(-log10(p.adj)), ">300", as.character(-log10(p.adj)))
+    ) %>%
+    dplyr::select(Reference, `RecM subset` = group2, `-log10(p)`, `-log10(p.adj)`)
+})
+
+## --- 3) Join summaries + p-values, order, and write ---------------------
+
+out <- as.data.table(summ_dt)[
+  as.data.table(tests),
+  on = .(Reference, `RecM subset`)
+]
+
+# Order rows
+out[, Reference := factor(Reference, levels = ref_order)]
+out[, `RecM subset` := factor(`RecM subset`, levels = subset_order)]
+setorder(out, Reference, `RecM subset`)
+
+# Select and order columns exactly as requested
+out <- out[, .(
+  Reference,
+  `RecM subset`,
+  Min,
+  `1st Quatile`,
+  Median,
+  `3rd Quatile`,
+  `Max value`,
+  Mean,
+  `-log10(p)`,
+  `-log10(p.adj)`
+)]
+
+# Write CSV
+fwrite(out, here("output", "RecM_summary_with_p.csv"))
+
+```
+
+
+## 6.2 Prepare clustered object
+```{r}
+seu <- qread(here("data","public_datasets","SCEs","public.integrated.clustered.SEU.qs"),nthreads=16)
+seu@reductions$umap@cell.embeddings[,1] <- -seu@reductions$umap@cell.embeddings[,1]
+seu@meta.data$orig.celltype[seu@meta.data$orig.ident == "Li" & seu@meta.data$orig.celltype == "Mono"] <- "Mono."
+
+# rename celltype
+seu$orig.celltype <- factor(seu$orig.celltype, levels=c("MDM-CCR2+","MDM-IV","MDM-FABP4low",
+                                                        "MDM-FABP4high","Mono","MDM-PLA2G7high","IM",
+                                                        "Mono.","SPP1.IMs","FOLR2.IMs",
+                                                        "Monocytes","Mono/Mφ","CD163/LGMN-Mφ"))
+# Split objects
+## reference
+seu.ref <- subset(seu, orig.ident == "CF paed")
+seu.ref$orig.celltype <- fct_drop(seu.ref$orig.celltype)
+seu.ref$orig.celltype <- factor(seu.ref$orig.celltype,
+                                levels=c("MDM-CCR2+","MDM-IV","MDM-FABP4low",
+                                         "MDM-FABP4high","Mono","MDM-PLA2G7high","IM"))
+seu.ref$condition <- factor(seu.ref$condition, levels=c("HC","CFM","CFS"))
+
+## Li et al.
+seu.li <- subset(seu, orig.ident == "Li")
+seu.li$orig.celltype <- fct_drop(seu.li$orig.celltype)
+seu.li$orig.celltype <- factor(seu.li$orig.celltype,
+                                levels=c("Mono.","SPP1.IMs","FOLR2.IMs"))
+
+## Wendisch et al.
+seu.wendisch <- subset(seu, orig.ident == "Wendisch")
+seu.wendisch$orig.celltype <- fct_drop(seu.wendisch$orig.celltype)
+seu.wendisch$orig.celltype <- factor(seu.wendisch$orig.celltype,
+                                levels=c("Monocytes","Mono/Mφ","CD163/LGMN-Mφ"))
+
+# set colors
+dataset.colours <- setNames(c("#06948E","#C03830","#E7872B"),
+                               levels(seu$orig.ident))
+dataset.labels <- c("Present study", "Li", "Wendisch")
+
+subtype.colours <- setNames(c("#f2cc8f", "#7209b7", "#83c5be","#3a6ea5", "#9e2a2b", "#9c6644", "#9a8c98", # ref
+                              "#d81159","#b08968","#a480cf", # Li et al.
+                              "#ff002b","#218380","#deab90" # Wendisch et al.
+                              ),
+                               levels(seu$orig.celltype))
+```
+
+## 6.3 UMAP embeddings
+### 6.3.1 Grouped by datasets
+```{r fig.height=3, fig.width=3}
+# Grouped by datasets
+p2 <- DimPlot(seu, 
+        reduction = 'umap',
+        pt.size = 0.001,
+        label.box = FALSE,
+        label = FALSE, 
+        shuffle = TRUE,
+        order = TRUE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 4, 
+        cols=dataset.colours,
+        #split.by = "Condition",
+        group.by = "orig.ident") + #NoLegend() +
+  labs(x = NULL, y = NULL,title="") + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_blank(),
+        text=element_text(family="Arial"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 10),
+        legend.key.size = unit(0.2,"cm"),
+        legend.text.align = 0,
+        strip.text.x = element_text(face = "bold", vjust=2, size=12)) + NoLegend() +
+  scale_color_manual(values = dataset.colours,
+                    labels = dataset.labels)
+suppressWarnings(print(p2))
+```
+
+### 6.3.2 Split by datasets; grouped by celltype labels
+```{r fig.height=3, fig.width=12}
+# subtype.labels <- c("Mono", 
+#                     "MDM-IV", 
+#                     expression('MDM-'*italic('CCR2')^'+'),
+#                     expression('MDM-'*italic('FABP4')^'low'),
+#                     expression('MDM-'*italic('FABP4')^'high'),
+#                     expression('MDM-'*italic('PLA2G7')^'high'),
+#                     "IM",
+#                     expression(italic('SPP1')*".IMs"),
+#                     expression(italic('FOLR2')*".IMs"),
+#                     "Monocytes",
+#                     "Mono/Mφ",
+#                     expression(italic("CD163")*"/"*italic("LGMN")*"-Mφ"))
+# 
+# seu$orig.ident <- gsub("CF paed","Present study",seu$orig.ident)
+# seu$orig.ident <- factor(seu$orig.ident, levels=c("Present study","Li","Wendisch"))
+# dataset.colours <- setNames(c("#20a39e","#ef5b5b","#ffba49"),
+#                                levels(seu$orig.ident))
+
+# ref
+# subtype.colours <- setNames(c("#f2cc8f", "#7209b7", "#83c5be", "#3a6ea5","#9e2a2b", "#9c6644", "#9a8c98"), # ref
+#                             levels(seu.ref$orig.celltype))
+subtype.labels <- c("Mono", 
+                    "MDM-IV", 
+                    expression('MDM-'*italic('FABP4')^'lo'),
+                    expression('MDM-'*italic('FABP4')^'hi'),
+                    "MDM-inflam",
+                    expression('MDM-'*italic('PLA2G7')^'hi'),
+                    "IM")
+
+ps1 <- DimPlot(seu.ref, 
+        reduction = 'umap',
+        pt.size = 0.1,
+        label.box = FALSE,
+        label = FALSE, 
+        shuffle = FALSE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 4, 
+        cols=subtype.colours,
+        #split.by = "orig.ident",
+        group.by = "orig.celltype") + #NoLegend() +
+  labs(title="Present study", x = NULL, y = NULL) + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_text(size=12, hjust=0.5,face = "plain"),
+        text=element_text(family="Arial"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 10),
+        legend.text.align = 0,
+        strip.text.x = element_text(face = "bold", vjust=2, size=12)) +
+  scale_color_manual(values=subtype.colours, labels = subtype.labels)
+
+# Li
+# subtype.colours <- setNames(c("#d81159", "#b08968","#a480cf"), # Li et al.
+#                             levels(seu.li$orig.celltype))
+subtype.labels <- c("Mono", 
+                    expression(italic('SPP1')*".IMs"),
+                    expression(italic('FOLR2')*".IMs"))
+
+ps2 <- DimPlot(seu.li, 
+        reduction = 'umap',
+        pt.size = 0.1,
+        label.box = FALSE,
+        label = FALSE, 
+        shuffle = FALSE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 4, 
+        cols=subtype.colours,
+        #split.by = "orig.ident",
+        group.by = "orig.celltype") + #NoLegend() +
+  labs(title="Li", x = NULL, y = NULL) + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_text(size=12, hjust=0.5, face="plain"),
+        text=element_text(family="Arial"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 10),
+        legend.text.align = 0,
+        strip.text.x = element_text(face = "bold", vjust=2, size=12)) +
+  scale_color_manual(values=subtype.colours, labels = subtype.labels)
+
+# Wendisch
+# subtype.colours <- setNames(c("#ff002b","#218380","#deab90"), # Wendisch et al.
+#                             levels(seu.wendisch$orig.celltype))
+subtype.labels <- c("Monocytes",
+                    "Mono/Mφ",
+                    expression(italic("CD163")*"/"*italic("LGMN")*"-Mφ"))
+
+ps3 <- DimPlot(seu.wendisch, 
+        reduction = 'umap',
+        pt.size = 0.1,
+        label.box = FALSE,
+        label = FALSE, 
+        shuffle = FALSE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 4, 
+        cols=subtype.colours,
+        #split.by = "orig.ident",
+        group.by = "orig.celltype") + #NoLegend() +
+  labs(title="Wendisch", x = NULL, y = NULL) + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_text(size=12, hjust=0.5, face="plain"),
+        text=element_text(family="Arial"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 10),
+        legend.text.align = 0,
+        strip.text.x = element_text(face = "bold", vjust=2, size=12)) +
+  scale_color_manual(values=subtype.colours, labels = subtype.labels)
+
+p3 <- suppressWarnings(print(ps1+ps2+ps3))
+p3
+```
+
+### 6.3.3 Profibrotic cell type density
+```{r fig.height=3, fig.width=9}
+seu$Harmony.UMAP1 <- seu@reductions$umap@cell.embeddings[,1]
+seu$Harmony.UMAP2 <- seu@reductions$umap@cell.embeddings[,2]
+seu$CellID <- rownames(seu@meta.data)
+
+get_density <- function(x, y, ...) {
+  dens <- MASS::kde2d(x, y, ...)
+  ix <- findInterval(x, dens$x)
+  iy <- findInterval(y, dens$y)
+  ii <- cbind(ix, iy)
+  return(dens$z[ii])
+}
+
+dens.umap.list <- list()
+loop.cells <- levels(seu$orig.celltype)
+
+for(i in seq_along(loop.cells)){
+    i.c <- loop.cells[i]
+    # change this to 1% of all cells
+    i.n <- ceiling(sum(seu$orig.celltype %in% i.c)/100)
+    if(i.n < 100){
+      i.n <- 100
+    }
+    i.dens <- get_density(seu$Harmony.UMAP1[seu$orig.celltype %in% i.c],
+                          seu$Harmony.UMAP2[seu$orig.celltype %in% i.c], n=i.n)
+    
+    dens.umap.list[[i.c]] <- data.frame("orig.celltype"=i.c,
+                                        "CellID"=seu$CellID[seu$orig.celltype %in% i.c],
+                                        "Dens"=i.dens)
+}
+
+umap.dens <- do.call(rbind.data.frame, dens.umap.list)
+umap.dens.merge <- base::merge(seu@meta.data, umap.dens, by=c('orig.celltype', 'CellID'))
+
+
+cell.order <- c("MDM-PLA2G7high","SPP1.IMs","CD163/LGMN-Mφ")
+title.list <- setNames(c(expression('MDM-'*italic('PLA2G7')^'hi'),
+                         expression(italic('SPP1')*".IMs"),
+                         expression(italic("CD163")*"/"*italic("LGMN")*"-Mφ")),
+                       cell.order)
+pt.list <- list()
+for(x in seq_along(cell.order)){
+  x.c <- cell.order[x]
+  
+  p <- ggplot(umap.dens.merge,
+         aes(x=Harmony.UMAP1, y=Harmony.UMAP2)) +
+    geom_scattermore(data=umap.dens.merge[, c("Harmony.UMAP1", "Harmony.UMAP2")],
+                     colour='#adb5bd',) +
+    geom_point_rast(data=umap.dens.merge[umap.dens.merge$orig.celltype %in% x.c, ],
+                    aes(colour=Dens), size=0.001) +
+    scale_colour_viridis() +
+    labs(title=title.list[x.c], x="UMAP1", y="UMAP2") +
+    theme_cowplot() +
+    guides(colour=guide_colourbar(title="Density")) +
+    theme(plot.title=element_text(size=10,hjust=0.5,face="plain"),
+          legend.key.size = unit(0.2, "cm"),
+          axis.text=element_blank(),
+          axis.title=element_blank(),
+          axis.line = element_blank(),
+          axis.ticks=element_blank(),
+          legend.title=element_text(size=6),
+          legend.text=element_blank())
+    pt.list[[x.c]] <- p
+}
+
+
+p4 <- pt.list[[1]] + pt.list[[2]] + pt.list[[3]]
+p4
+```
+
+## 6.4 Feature violin plot
+```{r}
+subtype.colours <- setNames(c("#f2cc8f", "#7209b7", "#83c5be","#3a6ea5", "#9e2a2b", "#9c6644", "#9a8c98", # ref
+                              "#d81159","#b08968","#99ccff", # Li et al.
+                              "#ff002b","#f06900","#deab90" # Wendisch et al.
+                              ),
+                               levels(seu$orig.celltype))
+
+subtype.labels <- c("Mono", 
+                    "MDM-IV", 
+                    expression('MDM-'*italic('FABP4')^'low'),
+                    expression('MDM-'*italic('FABP4')^'high'),
+                    "MDM-inflam",
+                    expression('MDM-'*italic('PLA2G7')^'high'),
+                    "IM",
+                    "Mono",
+                    expression(italic('SPP1')*".IMs"),
+                    expression(italic('FOLR2')*".IMs"),
+                    "Monocytes",
+                    "Mono/Mφ",
+                    expression(italic("CD163")*"/"*italic("LGMN")*"-Mφ"))
+
+Idents(seu) <- "orig.ident"
+
+p <- VlnPlot(seu, c("SPP1","PLA2G7","CD163","LGMN","MARCKS","A2M","MERTK","GPNMB"),
+        slot = "data",
+        #split.plot = TRUE,
+        combine=FALSE,
+        group.by = "orig.celltype",
+        #split.by = "orig.ident",
+        #keep.scale = "feature",
+        ncol = 4,
+        pt.size =0)
+
+p <- lapply(p, FUN = function(x) {
+  pt <- x + 
+    scale_fill_manual(values=subtype.colours) +
+    scale_x_discrete(labels=subtype.labels) +
+    labs(x = NULL) +
+    theme(plot.title = element_text(face="bold.italic", size=12),
+        axis.text.x=element_text(angle=45, vjust=1, hjust=1, size=8),
+        axis.text.y=element_text(size=8)
+        ) +
+    NoLegend()
+  return(pt)
+})
+
+p5 <- ((p[[1]] + theme(axis.text.x = element_blank(), 
+                       axis.title.y=element_text(size=10,hjust=4))) |
+  (p[[2]] + theme(axis.text.x = element_blank(), axis.title.y=element_blank())) |
+  (p[[3]] + theme(axis.text.x = element_blank(), axis.title.y=element_blank())) |
+  (p[[4]] + theme(axis.text.x = element_blank(), axis.title.y=element_blank())))/
+  ((p[[5]] + theme(axis.title.y=element_blank())) | 
+     (p[[6]] + theme(axis.title.y=element_blank())) |
+     (p[[7]] + theme(axis.title.y=element_blank())) |
+     (p[[8]] + theme(axis.title.y=element_blank())))
+
+p5
+
+```
+
+# 7 Save figures
+```{r}
+celltype <- "public"
+out <- here("output","plots",celltype)
+if(!dir.exists(out)) {
+  dir.create(out,recursive = TRUE)
+}
+
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 1600)
+
+# gene set enrichment score
+layout = "AAAAAAAAAA\nBBCCDDEEFF"
+p1 +
+  #plot_layout(design = layout) +
+  theme(plot.tag = element_text(size = 14, face = "bold", family="Arial"))
+
+ggsave(plot=last_plot(),
+       device="jpeg",
+       dpi=1600,
+       filename = paste0(out,"/","public.geneSetScore.jpeg"),
+       height=6,
+       width=15)
+
+# umap grouped by dataset
+p2 +
+  theme(plot.tag = element_text(size = 14, face = "bold", family="Arial"))
+
+ggsave(plot=last_plot(),
+       device="jpeg",
+       dpi=1600,
+       filename = paste0(out,"/","public.umap_dataset.jpeg"),
+       height=4,
+       width=4)
+
+# umap split by dataset
+layout = "AABBCC\nAABBCC"
+ps1 + ps2 + ps3 +
+  plot_layout(design = layout) +
+  theme(plot.tag = element_text(size = 14, face = "bold"))
+
+ggsave(plot=last_plot(),
+       device="jpeg",
+       dpi=1600,
+       filename = paste0(out,"/","public.umap_splitdataset.jpeg"),
+       height=3,
+       width=12)
+
+# Kernel density plot
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 1600)
+layout = "AABBCC"
+pt.list[[1]]+pt.list[[2]]+pt.list[[3]] + 
+  plot_layout(design = layout) +
+  theme(plot.tag = element_text(size = 14, face = "bold", family="Arial"))
+ggsave(last_plot(),
+       device="jpeg",
+       dpi=1600,
+       filename = paste0(out,"/","public.kernelDensity.jpeg"),
+       height=3,
+       width=9)
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 100)
+
+# featureplot
+p5 +
+  theme(plot.tag = element_text(size = 14, face = "bold", family="Arial"))
+ggsave(last_plot(),
+       device="jpeg",
+       dpi=1600,
+       filename = paste0(out,"/","public.featurePlot.jpeg"),
+       height=4,
+       width=12)
+
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 100)
+
+```
+
+
+# 8 Save object
+```{r}
+out <- here("data","SCEs","analysis",paste0("bal_",celltype,".analysis.SEU.qs"))
+
+if (!file.exists(out)) {
+  qsave(seu,file=out,nthreads=16)
+}
+
+```
+
+
+

@@ -1,0 +1,153 @@
+#!/usr/bin/env Rscript
+
+# This script performs integration and clustering analysis
+
+# Load packages
+suppressPackageStartupMessages({
+library(harmony)
+library(Seurat)
+library(here)
+library(qs)
+library(ggplot2)
+library(clustree)
+library(cowplot)
+library(forcats)
+library(ggplot2)
+library(dplyr)
+library(RColorBrewer)
+library(pals)
+})
+set.seed(1990)
+options(future.globals.maxSize = 500000000000, future.seed=TRUE)
+date <- Sys.Date()
+
+if(!dir.exists(here("data","plots"))) {
+  dir.create(here("data","plots"), recursive = TRUE)
+}
+
+if(!dir.exists(here("data","SCEs","merge"))) {
+  dir.create(here("data","SCEs","merge"), recursive = TRUE)
+}
+
+if(!dir.exists(here("data","SCEs","integration"))) {
+  dir.create(here("data","SCEs","integration"), recursive = TRUE)
+}
+
+# SCTransform, merge, and PCA --------------------------------------------------
+out <- here("data","SCEs","merge","bal.SCT.obj.list.qs")
+s <- here("data","SCEs","merge","bal.annotated.merged.SEU.qs")
+
+if(!file.exists(out)) {
+  seu <- qread(here("data","SCEs","annotation","bal.annotated.SEU.qs"),nthreads=24)
+  DefaultAssay(seu) <- "RNA"
+  seu <- DietSeurat(seu, assays = "RNA", dimreducs = NULL, graphs = NULL)
+  
+  # split object by experiment
+  obj.list <- SplitObject(seu, split.by="batchID")
+  
+  # 1st round of SCTransform normalization
+  print("Running SCTransform normalization...")
+  obj.list <- lapply(X = obj.list, FUN = function(x) {
+    x <- SCTransform(x, vst.flavor = "v2", verbose=TRUE)
+  })
+  
+  # save object list
+  qsave(obj.list, file = out, nthreads=24)
+  
+  # find most variable features across samples to integrate
+  var.features <- SelectIntegrationFeatures(object.list = obj.list, nfeatures=3000)
+  
+  # merge normalized samples
+  seu <- merge(obj.list[[1]], y=obj.list[2:length(obj.list)], merge.data=TRUE)
+  DefaultAssay(seu) <- "SCT"
+  
+  # manually set variable features of merged Seurat object
+  VariableFeatures(seu) <- var.features
+  
+  # PCA
+  print("Running PCA...")
+  seu <- RunPCA(seu, verbose=TRUE)
+  
+  # save merged object
+  qsave(seu, file=s, nthreads=24)
+  
+  obj.list <- NULL
+  
+} else {if (!file.exists(s)) {
+  # read object list
+  obj.list <- qread(out, nthreads=24)
+  
+  # find most variable features across samples to integrate
+  var.features <- SelectIntegrationFeatures(object.list = obj.list, nfeatures=3000)
+  
+  # merge normalized samples
+  seu <- merge(obj.list[[1]], y=obj.list[2:length(obj.list)], merge.data=TRUE)
+  DefaultAssay(seu) <- "SCT"
+  
+  # manually set variable features of merged Seurat object
+  VariableFeatures(seu) <- var.features
+  
+  # PCA
+  print("Running PCA...")
+  seu <- RunPCA(seu, verbose=TRUE, npcs = 100)
+  
+  qsave(seu, file=s, nthreads=24)
+  
+} else {
+  seu <- qread(s, nthreads=24)
+}}
+
+# Harmony integration ----------------------------------------------------------
+
+# run Harmony
+print("Running Harmony integration...")
+DefaultAssay(seu) <- "SCT"
+seu <- RunHarmony(seu, 
+                  group.by.vars=c("batchID"),
+                  reduction="pca",
+                  assay.use="SCT",
+                  reduction.save="harmony",
+                  plot_convergence=TRUE,
+                  early_stop=FALSE,
+                  max_iter=500)
+
+# save integrated object
+out <- here("data","SCEs","integration","bal.annotated.merged.integrated.SEU.qs")
+if(!file.exists(out)) {
+  qsave(seu, file = out, nthreads=16)
+}
+
+# Leiden clustering ------------------------------------------------------------
+print("Running Leiden clustering...")
+if(!dir.exists(here("data","SCEs","clustering"))) {
+  dir.create(here("data","SCEs","clustering"), recursive = TRUE)
+}
+out <- here("data","SCEs","clustering","bal.annotated.merged.integrated.clustered.SEU.qs")
+
+if(!file.exists(out)) {
+  
+  #seu <- qread(here("data","SCEs","integration","bal.annotated.merged.integrated.SEU.qs"), nthreads=24)
+  
+  seu <- FindNeighbors(seu, reduction="harmony", dims=1:50)
+  
+  plan("multicore", workers=20)
+  print("Running Leiden clustering...")
+  seu <- FindClusters(seu, algorithm = 4,
+                      method = "igraph",
+                      resolution = seq(0.2,3,by=0.2))
+  
+  # run UMAP
+  seu <- RunUMAP(seu, reduction="harmony", assay="SCT", dims=1:50)
+  
+  # run clustree
+  ggsave(plot=clustree(seu, prefix="SCT_snn_res."), device="pdf",
+         width = 10,
+         height = 30,
+         file=here("data","plots",celltype,paste0("BAL.",celltype,"clustree.",date,".pdf")))
+  
+  # save clustered object
+  qsave(seu, file = out, nthreads = 16)
+} else {
+  seu <- readRDS(out)
+}
+

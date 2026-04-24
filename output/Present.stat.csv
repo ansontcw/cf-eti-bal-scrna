@@ -1,0 +1,8 @@
+"","estimate",".y.","group1","group2","n1","n2","statistic","p","conf.low","conf.high","method","alternative","p.adj","p.adj.signif"
+"1",0.0615795410734055,"Cluster1","all","Mono",17584,1819,20717276.5,1,-Inf,0.0672358027015026,"Wilcoxon","less",1,"ns"
+"2",0.0248951041650986,"Cluster1","all","MDM-IV",17584,642,6275701,1,-Inf,0.0341752681885236,"Wilcoxon","less",1,"ns"
+"3",0.0797702279766549,"Cluster1","all","MDM-FABP4lo",17584,3620,44655129,1,-Inf,0.0839224385583459,"Wilcoxon","less",1,"ns"
+"4",0.0749689616028824,"Cluster1","all","MDM-FABP4hi",17584,4792,57924777,1,-Inf,0.0785776833705855,"Wilcoxon","less",1,"ns"
+"5",-0.149222581615325,"Cluster1","all","MDM-inflam",17584,1055,5201229.5,1.34e-127,-Inf,-0.141068302375621,"Wilcoxon","less",3.13e-127,"****"
+"6",-0.307666543091462,"Cluster1","all","MDM-PLA2G7hi",17584,3490,9649860,0,-Inf,-0.30136024182081,"Wilcoxon","less",0,"****"
+"7",-0.159493604296856,"Cluster1","all","IM",17584,2166,10174555,3.85e-275,-Inf,-0.15371391691238,"Wilcoxon","less",1.35e-274,"****"

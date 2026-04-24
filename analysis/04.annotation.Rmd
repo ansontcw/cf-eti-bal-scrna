@@ -1,0 +1,1111 @@
+---
+title: 'Annotation of BAL cells'
+author:
+- name: Anson Wong
+date: "`r Sys.Date()`"
+description: null
+output: html_document
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+xaringanExtra::use_panelset()
+
+```
+
+# 1 Load packages
+
+```{r}
+suppressPackageStartupMessages({
+library(Seurat)
+library(here)
+library(qs)
+library(forcats)
+library(pals)
+library(ggplot2)
+library(speckle)
+library(scCustomize)
+library(patchwork)
+library(dplyr)
+library(Cepo)
+library(rstatix)
+library(ggpubr)
+})
+set.seed(1990)
+
+```
+
+# 2 Reference-based annotation, integration, clustering
+
+After filtering low-quality cells and uninformative genes, reference-based annotation (Human Lung Cell Atlas v2) was performed on the clean dataset using RunAzimuth(). Due to internal in-house server compatibility issues, R v4.2.2 instead of R v4.1.2 was used for running this step. For details, refer to code/annotation_HLCAv2.R
+
+The dataset was normalized across batches using SCTransform v2 regularization and subjected to PCA. Harmony was used to adjust PCs by capture and sample ID for 500 iteration. The first 50 PCs were used to compute the shared nearest neighbor graph for Leiden clustering with a resolution of 3. Cells were manually annotated with reference to Azimuth annotation results and the RNA expression of known marker genes provided in previous studies (Madissoon et al. 2022, Sikkema et al. 2023). For details, refer to code/integration_clustering.R
+
+Manual annoatation was performed on all BAL cells to define major cell type.
+
+# 3 Manual annotation - Combined
+
+## 3.1 Load clustered object
+
+```{r}
+seu <- qread(here("data",
+                  "SCEs",
+                  "clustering",
+                  "bal.annotated.merged.integrated.clustered.SEU.qs"), nthreads=16)
+
+seu$predicted.ann_level_3 <- factor(seu$predicted.ann_level_3)
+seu$predicted.ann_finest_level <- factor(seu$predicted.ann_finest_level)
+seu$sampleID <- factor(seu$sampleID)
+seu$Capture <- factor(seu$Capture)
+seu$Condition <- factor(seu$Condition)
+seu$SCT_snn_res.3 <- factor(seu$SCT_snn_res.3,
+                            levels=as.character(seq(1,64)))
+
+seu@reductions$umap@cell.embeddings[,1] <- -seu@reductions$umap@cell.embeddings[,1]
+seu@reductions$umap@cell.embeddings[,2] <- -seu@reductions$umap@cell.embeddings[,2]
+
+```
+
+## 3.2 Visualize UMAP embeddings
+
+```{r}
+# prepare colours
+colours <- c(brewer.paired(12), brewer.pastel1(9), rev(brewer.accent(8)), rev(brewer.dark2(8)), 
+             brewer.set1(9), brewer.pastel2(8), brewer.spectral(11), 
+             brewer.brbg(11)[1:5],rev(brewer.set3(12)),brewer.brbg(11)[6:11],
+             brewer.piyg(11)[1:5],brewer.piyg(11)[7:11], brewer.piyg(11)[1:5],brewer.piyg(11)[7:11])
+
+
+p1 <- DimPlot(seu, 
+        reduction = 'umap',
+        pt.size = 0.1,
+        label = FALSE, 
+        shuffle = TRUE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 2.5, 
+        cols=c(brewer.paired(12),brewer.pastel1(9),rev(brewer.dark2(8)),brewer.accent(8)),
+        # cols=c("#054a91", "#fb6f92", "#81a4cd", "#b79ced","7d451b","#a3b18a", 
+        #        "#0e9594", "#f77f00", "#b23a48"),
+        split.by = "Condition",
+        group.by = "predicted.ann_finest_level") +
+  #scale_x_continuous(breaks = c(-5, 0, 5)) +
+  #scale_color_manual(values=Annotation.colours) +
+  labs(x = NULL, y = NULL) + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_blank(),
+        text=element_text(family="Arial"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 10),
+        strip.text.x = element_text(face = "bold", vjust=2, size=12))
+
+p2 <- DimPlot(seu, 
+        reduction = 'umap',
+        pt.size = 0.1,
+        #label.box = TRUE,
+        label = FALSE, 
+        shuffle = TRUE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 2.5, 
+        cols=colours,
+        # cols=c("#054a91", "#fb6f92", "#81a4cd", "#b79ced","7d451b","#a3b18a", 
+        #        "#0e9594", "#f77f00", "#b23a48"),
+        split.by = "Condition",
+        group.by = "SCT_snn_res.3") + #NoLegend() +
+  #scale_x_continuous(breaks = c(-5, 0, 5)) +
+  #scale_color_manual(values=Annotation.colours) +
+  labs(x = NULL, y = NULL) + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_blank(),
+        text=element_text(family="Arial"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 10),
+        strip.text.x = element_text(face = "bold", vjust=2, size=12))
+
+p3 <- DimPlot(seu, 
+        reduction = 'umap',
+        pt.size = 0.1,
+        label = FALSE, 
+        shuffle = TRUE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 2.5, 
+        cols=c(brewer.paired(12),brewer.pastel1(9),rev(brewer.dark2(8)),brewer.accent(8)),
+        # cols=c("#054a91", "#fb6f92", "#81a4cd", "#b79ced","7d451b","#a3b18a", 
+        #        "#0e9594", "#f77f00", "#b23a48"),
+        # split.by = "Condition",
+        group.by = "predicted.ann_finest_level") +
+  #scale_x_continuous(breaks = c(-5, 0, 5)) +
+  #scale_color_manual(values=Annotation.colours) +
+  labs(x = NULL, y = NULL) + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_blank(),
+        text=element_text(family="Arial"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 10),
+        strip.text.x = element_text(face = "bold", vjust=2, size=12))
+
+p4 <- DimPlot(seu, 
+        reduction = 'umap',
+        pt.size = 0.1,
+        label.box = TRUE,
+        label = TRUE, 
+        shuffle = TRUE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 2, 
+        cols=colours,
+        # cols=c("#054a91", "#fb6f92", "#81a4cd", "#b79ced","7d451b","#a3b18a", 
+        #        "#0e9594", "#f77f00", "#b23a48"),
+        # split.by = "Condition",
+        group.by = "SCT_snn_res.3") + NoLegend() +
+  #scale_x_continuous(breaks = c(-5, 0, 5)) +
+  #scale_color_manual(values=Annotation.colours) +
+  labs(x = NULL, y = NULL) + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_blank(),
+        text=element_text(family="Arial"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 10),
+        strip.text.x = element_text(face = "bold", vjust=2, size=12))
+p1
+p2
+p3
+p4
+
+```
+
+## 3.3 Proportion of cells per cluster
+
+```{r}
+
+labels <- c("predicted.ann_finest_level","SCT_snn_res.3")
+p <- vector("list",length(labels))
+
+for(label in labels){
+  seu@meta.data %>%
+    ggplot(aes(x = !!sym(label), fill = !!sym(label))) +
+    geom_bar() +
+    geom_text(aes(label = ..count..), stat = "count",
+              angle=90, colour = "black", size = 2) +
+    scale_y_log10() +
+    theme(axis.text.x = element_blank(),
+          axis.title.x = element_blank(),
+          axis.ticks.x = element_blank()) +
+    NoLegend() + scale_fill_manual(values = rev(colours)) +
+    labs(y = "No. Cells (log scale)") -> p1
+  
+  seu@meta.data %>%
+    dplyr::select(!!sym(label), Condition) %>%
+    group_by(!!sym(label), Condition) %>%
+    summarise(num = n()) %>%
+    mutate(prop = num / sum(num)) %>%
+  ggplot(aes(x = !!sym(label), y = prop * 100, 
+             fill = Condition)) + 
+    geom_bar(stat = "identity") +
+    theme(axis.text.x = element_text(angle = 45, size=6,
+                                     vjust = 1, 
+                                     hjust = 1)) +
+    labs(y = "% Cells", fill = "Condition") -> p2
+  
+  p1 / p2 -> p[[label]]
+}
+p
+
+```
+
+## 3.4 Visualize feature expression
+
+```{r}
+# # proliferating
+# FeaturePlot(seu, c("MKI67","PCLAF"), ncol = 2, raster=TRUE, cols=inferno(256))
+# #FeaturePlot(seu, c("G2M.Score","S.Score"), ncol = 2, raster=TRUE, cols=inferno(256))
+# 
+# # Secretory
+# FeaturePlot(seu, c("SCGB3A2","SCGB1A1","CCNO","VSIG2","CEACAM5","CYP2F1","TSPAN8","MUC5AC"
+#                    ), ncol = 3, raster=FALSE, cols=inferno(256))
+# 
+# # Multiciliated
+# FeaturePlot(seu, c("CCDC78","FOXJ1","PIFO","DCDC2B","DTHD1","GSTA1"
+#                    ), ncol = 2, raster=FALSE, cols=inferno(256))
+# 
+# # pDC
+# FeaturePlot(seu, c("JCHAIN","CLEC4C","PLD4","LIRA4","CXCR3","IL3RA"
+#                    ), ncol = 2, raster=FALSE, cols=inferno(256))
+# 
+# # TRM
+# FeaturePlot(seu, c("MARCO","APOE","C1QA","CD163"), ncol = 2, raster=TRUE, cols=inferno(256))
+# 
+# # monocyte-derived macrophage
+# FeaturePlot(seu,c("MARCO","C1QA","VCAN","CCL2","FCN1","EREG","MS4A6A","CD14","CD300E"),
+#             ncol=3,raster=TRUE, cols=inferno(256))
+# 
+# # cDC
+# FeaturePlot(seu, c("CLEC9A","XCR1","IDO1","CD1C","CLEC10A","FCGR2B","FCER1A","MEF2C",
+#                    "CCR7","BIRC3","RASSF4","TRAF1","EBI3"
+#                    ), ncol = 4, raster=FALSE, cols=inferno(256))
+# 
+# # mast
+# FeaturePlot(seu, c("BIRC3","NFKB1","NAMPT","BATF","TNFAIP3","HDC","RGS13",
+#                    "TPSD1","SLC18A2","MS4A2","HPGDS","CPA3","TPSB2","TPSAB1"
+#                    ), ncol = 5, raster=FALSE, cols=inferno(256))
+# 
+# # RecM intravascular
+# FeaturePlot(seu, c("LILRB5","F13A1","STAB1","RNASE1","MAF","FOLR2",
+#                    "MARCO","C1QA","CD14","SLC40A1","SLC48A1"), ncol = 4, raster=TRUE, cols=inferno(256))
+# 
+# # interstitial
+# FeaturePlot(seu, c("CXCL10","CXCL9","CXCL11","GBP1","ISG15","MARCO",
+#                    "GBP2","PSTPIP2","GCH1","APOL3","IL1B","MARCKS"), ncol = 3, raster=TRUE, cols=inferno(256))
+# 
+# # CD14+ monocytes
+# FeaturePlot(seu, c("CD300E","FCN1","S100A12","EREG","CD14","VCAN",
+#                    "MARCO","LST1","LYZ","CCR2",
+#                    "IL1B","C1QA"), ncol = 4, raster=TRUE, cols=inferno(256))
+# 
+# # CD16+ monocytes
+# FeaturePlot(seu, c("FCGR3A","LILRB2","LILRB1","MTSS1","FAM110A","LRRC25",
+#                    "CDKN1C","ABI3","C1QA"), ncol = 3, raster=TRUE, cols=inferno(256))
+# 
+# # T cell
+# FeaturePlot(seu, c("CD96","MARCO","CCL5","CD3D"), ncol = 2, raster=TRUE, cols=inferno(256))
+# 
+# # NK & NKT
+# FeaturePlot(seu, c("CCL4","CCL5","PFN1","GZMA","GZMB",
+#                    "KLF2","GNLY","FGFBP2","NKG7","CD3D","CD3E","CD3G","ITGAM","ITGA1",
+#                    "CD8A","CD8B"),
+#                    ncol=4, raster=FALSE, cols=inferno(256))
+
+```
+
+## 3.5 Manual annotation
+
+```{r}
+# Use Azimuth result to annotate mast cells
+draft1 <- factor(
+      case_when(
+        seu$predicted.ann_finest_level == "Mast cells" ~ "Mast"))
+
+seu <- AddMetaData(seu, draft1, col.name = "draft1")
+
+# integrated 50PCs
+draft2 <- setNames(c("AM","AM","AM","T","AM", # 1-5
+                      "AM","AM","AM","T","AM", # 6-10
+                      "AM","AM","AM","AM","AM", # 11-15
+                      "RecM","RecM","RecM","AM","AM", # 16-20
+                      "AM","B","cDC","AM","AM", # 21-25
+                      "AM","AM","RecM","AM","AM", # 26-30
+                      "AM","AM","AM","Prolif M","Epithelial", # 31-35
+                      "AM","Prolif M","AM","AM","AM", # 36-40
+                      "AM","AM","AM","AM","T", # 41-45
+                      "T","pDC","NK","RecM","RecM", # 46-50
+                      "RecM","RecM","DC migratory","AM","RecM", # 51-55
+                      "RecM","Epithelial","Prolif M","AM","AM", # 56-60
+                      "T","B","cDC","T" # 61-64
+                       ), levels(seu$SCT_snn_res.3))
+
+draft2 <- factor(setNames(draft2[seu$SCT_snn_res.3],colnames(seu)),
+                     levels=c("AM",
+                              "RecM",
+                              "Prolif M",
+                              "cDC",
+                              "pDC",
+                              "DC migratory",
+                              "T",
+                              "NK",
+                              "B",
+                              "Epithelial"))
+
+seu <- AddMetaData(seu, draft2, col.name = "draft2")
+
+# coalesce two draft columns
+seu@meta.data %>%
+  mutate(celltype=coalesce(draft1,draft2)) -> seu@meta.data
+
+# reorder levels
+seu$celltype <- factor(seu$celltype,
+                       levels=c("AM","RecM","Prolif M","cDC","pDC","DC migratory","Mast",
+                                "T", "NK","B","Epithelial"))
+
+# remove draft columns
+seu$draft1 <- NULL
+seu$draft2 <- NULL
+
+Annotation.colours <- setNames(c("#054a91", # AM
+                                 "#dda15e", # RecM
+                                 "#81a4cd", # Prolif M
+                                 "#a3b18a", # cDC
+                                 "#81b29a", # pDC
+                                 "#3a5a40", # DC migratory
+                                 "#000000", # Mast
+                                 "#c3a995", # T
+                                 "#7f5539", # NK
+                                 "#5a189a", # B
+                                 "#b23a48" # Epithelial
+                                 ), # Secretory
+               levels(seu$celltype))
+```
+
+## 3.6 Check batch effect
+
+### 3.6.1 UMAP
+
+```{r fig.width=10, fig.height=3}
+# rename batch ID
+seu$batchID <- factor(seu$batchID,
+                       levels=c("A","B","C","D"))
+
+batchID2 <- setNames(c("batch 3","batch 4","batch 2", "batch 1"),
+                     levels(seu$batchID))
+
+batchID2 <- setNames(factor(batchID2[seu$batchID],levels=paste0("batch ",1:4)),
+                     colnames(seu))
+
+seu <- AddMetaData(seu, batchID2, col.name = "batchID2")
+
+batch.colours <- setNames(c("#e07a5f", 
+                           "#3d405b", 
+                           "#81b29a", 
+                           "#f2cc8f"),
+                  levels(seu$batchID2))
+
+# # umap
+# seu2 <- seu
+# seu <- RunUMAP(seu, reduction="pca", dims=1:50)
+# seu@reductions$umap@cell.embeddings[,2] <- -seu@reductions$umap@cell.embeddings[,2]
+# 
+# # before integration
+# DimPlot(seu, 
+#         reduction = 'umap',
+#         pt.size = 0.00001,
+#         label.box = FALSE,
+#         label = FALSE, 
+#         shuffle = TRUE,
+#         raster=FALSE,
+#         repel = TRUE,
+#         label.size = 2, 
+#         group.by = "batchID2") + #NoLegend() +
+#   scale_color_manual(values=batch.colours) +
+#   labs(title="Pre-integration",x = NULL, y = NULL) + 
+#   guides(x = "none", y = "none") +
+#   theme(plot.title = element_text(size=10),
+#         text=element_text(family="Arial"),
+#         axis.text = element_text(size=8),
+#         axis.title.y=element_text(vjust=-1,
+#                                   size=10),
+#         axis.title.x=element_text(#vjust=10,
+#                                   size=10),
+#         legend.text = element_text(size = 10),
+#         strip.text.x = element_text(face = "bold", vjust=2, size=12)) -> p1a
+# 
+# # after integration
+# DimPlot(seu2, 
+#         reduction = 'umap',
+#         pt.size = 0.00001,
+#         label.box = FALSE,
+#         label = FALSE, 
+#         shuffle = TRUE,
+#         raster=FALSE,
+#         repel = TRUE,
+#         label.size = 2, 
+#         group.by = "batchID2") + #NoLegend() +
+#   scale_color_manual(values=batch.colours) +
+#   labs(title="Post-integration", x = NULL, y = NULL) + 
+#   guides(x = "none", y = "none") +
+#   theme(plot.title = element_text(size=10),
+#         text=element_text(family="Arial"),
+#         axis.text = element_text(size=8),
+#         axis.title.y=element_text(vjust=-1,
+#                                   size=10),
+#         axis.title.x=element_text(#vjust=10,
+#                                   size=10),
+#         legend.text = element_text(size = 10),
+#         strip.text.x = element_text(face = "bold", vjust=2, size=12)) -> p1b
+# 
+# p1a|p1b
+# 
+# # split by batchID
+# DimPlot(seu2, 
+#         reduction = 'umap',
+#         pt.size = 0.00001,
+#         label.box = FALSE,
+#         label = FALSE, 
+#         shuffle = FALSE,
+#         raster=FALSE,
+#         repel = TRUE,
+#         label.size = 2, 
+#         split.by = "batchID2",
+#         group.by = "celltype") + #NoLegend() +
+#   scale_color_manual(values=Annotation.colours) +
+#   labs(x = NULL, y = NULL) + 
+#   guides(x = "none", y = "none") +
+#   theme(plot.title = element_blank(),
+#         text=element_text(family="Arial"),
+#         axis.text = element_text(size=8),
+#         axis.title.y=element_text(vjust=-1,
+#                                   size=10),
+#         axis.title.x=element_text(#vjust=10,
+#                                   size=10),
+#         legend.text = element_text(size = 10),
+#         strip.text.x = element_text(face = "bold", vjust=2, size=12)) -> p1c
+#         
+# suppressWarnings(p1c)
+
+```
+
+### 3.6.2 Proportion
+
+```{r fig.width=2, fig.height=2}
+# calculate the proportion of cells --------------------------------------------
+props <- getTransformedProps(clusters=seu$celltype,
+                             sample=seu$batchID2)
+                             
+props$Proportions %>%
+  data.frame() -> df
+
+# stacked bar plot of cell proportion per sampleID
+pe2 <- ggplot(df, aes(x = sample, y = Freq, fill = clusters)) +
+  geom_bar(stat = "identity", position="stack") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size=8,
+                                   colour = "black"),
+        axis.text.y = element_text(size=8,
+                                   colour = "black"),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(face="bold", size=12)) +
+  labs( y = "Cell proportion", fill="batchID2", x=NULL) + NoLegend() +
+  guides(fill = guide_legend(keyheight=0.8,
+                             keywidth=0.8)) +
+  scale_fill_manual(values = Annotation.colours) +
+  theme(legend.text.align = 0, legend.title = element_blank())
+pe2
+
+```
+
+## 3.7 Save object
+
+```{r}
+out <- here("data","SCEs","manual.annot","bal.SEU.qs")
+if(!file.exists(out)) {
+  qsave(seu, file=out,nthreads =24)
+}
+```
+
+# 4 Visualize results after annotation
+
+## 4.1 Load object
+
+```{r}
+# 10.07.2025
+out <- here("data","SCEs","manual.annot","bal.SEU.qs")
+if(file.exists(out)) {
+  seu <- qread(out,nthreads =24)
+}
+
+# set color
+Annotation.colours <- setNames(c("#054a91", # AM
+                                 "#dda15e", # RecM
+                                 "#81a4cd", # Prolif M
+                                 "#a3b18a", # cDC
+                                 "#81b29a", # pDC
+                                 "#3a5a40", # DC migratory
+                                 "#000000", # Mast
+                                 "#c3a995", # T
+                                 "#7f5539", # NK
+                                 "#5a189a", # B
+                                 "#b23a48" # Epithelial
+                                 ), # Secretory
+               levels(seu$celltype))
+```
+
+## 4.2 Proportion per major cell type
+
+```{r fig.height=2.5, fig.width=5}
+# Subset object
+seu <- subset(seu, Condition != "CF.ETI" & 
+              sampleID != "M1C170C" & sampleID != "M1C176" & sampleID != "M1C180")
+gc()
+seu$Condition <- fct_drop(seu$Condition)
+seu$sampleID <- fct_drop(seu$sampleID)
+
+# Add Condition2
+draft1 <- factor(
+      case_when(
+        seu$Condition == "Control" ~ "C"))
+draft2 <- factor(
+  case_when(
+    seu$Bronchiectasis == "No" ~ "CFN",
+    seu$Bronchiectasis == "Yes" ~ "CFB"
+  )
+)
+
+Condition2 <- coalesce(draft1,draft2)
+names(Condition2) <- colnames(seu)
+seu <- AddMetaData(seu, Condition2, col.name = "Condition2")
+seu$Condition2 <- factor(seu$Condition2,levels=c("C","CFB","CFN"))
+
+# Rename Condition
+seu$Condition <- factor(
+  case_when(
+    seu$Condition == "Control" ~ "C",
+    seu$Condition == "CF" ~ "CF"
+  ),
+  levels=c("C","CF")
+)
+# Assign ID for analysis
+seu$sampleID <- factor(seu$sampleID,
+                       levels=c("M1N066","M1N075","M1N078","M1N080","M1N087","M1N092", # C
+                                "M1C160(1)","M1C188","M1C166(1)","M1C190C","M1C196B","M1C198B","M1C208A","M1C209A", # CFB
+                                "M1C170D","M1C176C","M1C180D","M1C177","M1C191B","M1C199B","M1C201A","M1C207B" # CFN
+                                ))
+
+ID <- setNames(c(paste0("C-",1:6),paste0("CFB-",1:8),paste0("CFN-",1:8)),
+               levels(seu$sampleID))
+
+ID <- setNames(factor(ID[seu$sampleID],levels=c(paste0("C-",1:6),paste0("CFB-",1:8),paste0("CFN-",1:8)),),
+               colnames(seu))
+
+seu <- AddMetaData(seu, ID, col.name = "ID")
+
+# calculate the proportion of cells --------------------------------------------
+props <- getTransformedProps(clusters=seu$celltype,
+                             sample=seu$ID)
+                             
+props$Proportions %>%
+  data.frame %>%
+  dplyr::mutate(Condition = c(rep("C",66),rep("CF",176)),
+                Condition2 = c(rep("C",66),rep("CFB",88),rep("CFN",88))) -> df
+
+df$Condition <- factor(df$Condition, levels=c("C","CF"))
+df$Condition2 <- factor(df$Condition2, levels=c("C","CFB","CFN"))
+df$sample <- factor(df$sample, levels=c(paste0("C-",1:6),paste0("CFB-",1:8),paste0("CFN-",1:8)))
+
+# stacked bar plot of cell proportion per sampleID
+p2 <- ggplot(df, aes(x = sample, y = Freq, fill = clusters)) +
+  geom_bar(stat = "identity", position="stack") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size=8,
+                                   colour = "black"),
+        axis.text.y = element_text(size=8,
+                                   colour = "black"),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(face="bold", size=12)) +
+  labs( y = "Cell proportion", fill="Subtype", x=NULL) + NoLegend() +
+  guides(fill = guide_legend(keyheight=0.8,
+                             keywidth=0.8)) +
+  scale_fill_manual(values = Annotation.colours) +
+  theme(legend.text.align = 0, legend.title = element_blank())
+p2
+```
+
+## 4.3 UMAP
+
+### 4.3.1 Split by Condition2
+
+```{r fig.height=3.5, fig.width=10}
+p1.nosplit <- DimPlot(seu, 
+        reduction = 'umap',
+        pt.size = 0.00001,
+        label.box = FALSE,
+        label = FALSE, 
+        shuffle = FALSE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 2, 
+        #split.by = "Condition2",
+        group.by = "celltype") + #NoLegend() +
+  scale_color_manual(values=Annotation.colours) +
+  labs(x = NULL, y = NULL) + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_blank(),
+        text=element_text(family="Arial"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 12),
+        strip.text.x = element_text(face = "bold", vjust=2, size=12))
+
+DimPlot(seu, 
+        reduction = 'umap',
+        pt.size = 0.00001,
+        label.box = FALSE,
+        label = FALSE, 
+        shuffle = FALSE,
+        raster=FALSE,
+        repel = TRUE,
+        label.size = 2, 
+        split.by = "Condition2",
+        group.by = "celltype") + #NoLegend() +
+  scale_color_manual(values=Annotation.colours) +
+  labs(x = NULL, y = NULL) + 
+  guides(x = "none", y = "none") +
+  theme(plot.title = element_blank(),
+        #text=element_text(family="Arial"),
+        axis.text = element_text(size=8),
+        axis.title.y=element_text(vjust=-1,
+                                  size=10),
+        axis.title.x=element_text(#vjust=10,
+                                  size=10),
+        legend.text = element_text(size = 12),
+        strip.text.x = element_text(face = "bold", vjust=2, size=14)) -> p1
+suppressWarnings(p1)
+
+```
+
+### 4.3.2 For Epithelial/RecM/AM/ProlifM
+
+```{r fig.height=3, fig.width=3}
+# Annotation.colours <- setNames(c("#054a91", # AM
+#                                  "#dda15e", # RecM
+#                                  "#81a4cd", # Prolif M
+#                                  "#a3b18a", # cDC
+#                                  "#81b29a", # pDC
+#                                  "#3a5a40", # DC migratory
+#                                  "#000000", # Mast
+#                                  "#c3a995", # T
+#                                  "#7f5539", # NK
+#                                  "#5a189a", # B
+#                                  "#b23a48" # Epithelial
+#                                  ), # Secretory
+#                levels(seu$celltype))
+# 
+# Annotation.colours <- setNames(c("#ced4da", # AM
+#                                  "#dda15e", # RecM
+#                                  "#ced4da", # Prolif M
+#                                  "#ced4da", # cDC
+#                                  "#ced4da", # pDC
+#                                  "#ced4da", # DC migratory
+#                                  "#ced4da", # Mast
+#                                  "#ced4da", # T
+#                                  "#ced4da", # NK
+#                                  "#ced4da", # B
+#                                  "#ced4da" # Epithelial
+#                                  ), # Secretory
+#                levels(seu$celltype))
+# 
+# p4 <- DimPlot(seu, 
+#         reduction = 'umap',
+#         pt.size = 0.00001,
+#         label.box = FALSE,
+#         label = FALSE, 
+#         shuffle = FALSE,
+#         raster=FALSE,
+#         repel = TRUE,
+#         label.size = 2, 
+#         #split.by = "Condition2",
+#         group.by = "celltype") + NoLegend() +
+#   scale_color_manual(values=Annotation.colours) +
+#   labs(x = NULL, y = NULL) + 
+#   guides(x = "none", y = "none") +
+#   theme(plot.title = element_blank(),
+#         text=element_text(family="Arial"),
+#         axis.text = element_text(size=8),
+#         axis.title.y=element_text(vjust=-1,
+#                                   size=10),
+#         axis.title.x=element_text(#vjust=10,
+#                                   size=10),
+#         legend.text = element_text(size = 12),
+#         strip.text.x = element_text(face = "bold", vjust=2, size=12))
+# 
+# 
+# p4
+# 
+# 
+# # Prolif M UMAP
+# celltype <- "RecM"
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 1600)
+# 
+# p4 +
+#   theme(plot.tag = element_text(size = 14, face = "bold"))
+# 
+# ggsave(plot=last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = here("output","plots","combined",paste0(celltype,".smallumap.jpeg")),
+#        height=3,
+#        width=3,
+#        bg = "transparent")
+# 
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 100)
+```
+
+## 4.4 Dotplot of marker genes
+
+```{r fig.height=4.5, fig.width=10}
+# Run Cepo
+cepoMarkers <- Cepo(seu[["SCT"]]@data,
+                    seu$celltype,
+                    exprsPct = 0.2)
+cepoMarkers$stats
+cepoMarkers$stats <- cepoMarkers$stats[, c("AM","RecM","Prolif.M","cDC","pDC",
+                                           "DC.migratory","Mast","T","NK","B",
+                                           "Epithelial")]
+
+sapply(1:ncol(cepoMarkers$stats), function(i){
+  names(sort(cepoMarkers$stats[,i], decreasing = TRUE))[1:300]
+}) %>% data.frame() -> dat
+
+colnames(dat) <- colnames(cepoMarkers$stats)
+dat %>% data.frame() %>% write.csv(file = here("data","Major.markers.csv"),row.names = FALSE)
+
+# Cepo marker gene -------------------------------------------------------------
+maxGenes <- 3
+sigGenes <- lapply(1:ncol(dat), function(i){
+  dat[,i][1:maxGenes] #%>% sort()
+})
+
+sig <- unlist(sigGenes)
+cepo <- sig #sig[!duplicated(sig)]
+# T
+cepo[22:24] <- c("CD3D","CD3G","CD3E")
+
+# TRM & RecM
+cepo2 <- c("FABP4","GPD1","PCOLCE2","MME","SCD","VCAN","FCN1","EMP1","CD14","CCL2",cepo[7:length(cepo)]) #
+
+
+cepo2 <- cepo2[!duplicated(cepo2)]
+
+# plot
+DefaultAssay(seu) <- "SCT"
+seu$celltype <- factor(seu$celltype, levels=rev(names(Annotation.colours)))
+
+# horizontal
+p3 <- DotPlot(seu,
+        features = cepo2,
+        group.by = "celltype",
+        col.max = 2,
+        col.min = -2,
+        dot.scale = 6
+        ) + #coord_flip() +
+  geom_point(aes(size=pct.exp), shape = 21, colour="black", stroke=0.5) +
+  #FontSize(y.text = 10, x.text = 8) + 
+  labs(y = element_blank(), x = element_blank()) + 
+  theme(text=element_text(family="Ariel"),
+        axis.text.x = element_text(size=10,
+                                   face="italic",
+                                   angle = 45,
+                                   hjust = 1,
+                                   vjust = 1),
+        axis.text.y = element_text(size=11),
+        legend.direction="vertical",
+        legend.position="right",
+        legend.justification = "right",
+        legend.box="vertical",
+        legend.text = element_text(size = 8),
+        #legend.title = element_text(size = 8,family = "Arial"),
+        ) +
+  scale_color_gradient(low = brewer.ylorrd(9)[1], high=brewer.ylorrd(9)[8]) +
+  #scale_y_discrete(labels = subtype.labels) +
+  scale_size_continuous(limits = c(0, 100), 
+                        breaks = c(0, 25, 50, 75, 100),
+                        labels=c(0,"",50,"",100)) +
+  guides(size=guide_legend(override.aes=list(shape=21, 
+                                             colour="black", 
+                                             fill="#adb5bd"),
+                                             title="% of exp. cells",
+                                             label.position="right",
+                                             title.position="left",
+                                             title.hjust=0.5,
+                           title.theme= element_text(angle = 90, vjust = 0.5, size=10)
+                                             ))
+
+p3$guides$colour$title <- "Mean Expression"
+p3$guides$colour$title.position <- "left"
+p3$guides$colour$title.hjust <- 0.5
+p3$guides$colour$title.theme <- element_text(angle = 90, vjust = 0.5, size=10)
+seu$celltype <- factor(seu$celltype, levels=names(Annotation.colours))
+
+suppressWarnings(print(p3))
+
+
+```
+
+## 4.5 CFTR expression proportion test
+
+```{r}
+Condition2.colours <- setNames(c("#26547c","#ef476f","#ffd166"),
+                               c("C","CFB","CFN"))
+
+DefaultAssay(seu) <- "RNA"
+cftr.list <- lapply(levels(seu$celltype), FUN = function(x) {
+  pt <- DotPlot(subset(seu, celltype==x), features = "CFTR", group.by = "ID")
+  dat <- pt$data %>% mutate(celltype=x)
+  return(dat)
+})
+
+df <- do.call("rbind", cftr.list) %>% dplyr::select(pct.exp,id,celltype) %>% dplyr::filter(celltype=="Epithelial")
+colnames(df) <- c("pct.exp","ID","celltype")
+rownames(df) <- NULL
+
+n.celltype <- length(levels(seu$celltype))
+
+df <- df %>% arrange(ID) %>% dplyr::mutate(Condition=c(rep("CF",16),
+                                                       rep("C",6)),
+                                           Condition2=c(rep("CFN",8),
+                                                        rep("CFB",8),
+                                                        rep("C",6)))
+
+df$Condition <- factor(df$Condition, levels=c("C","CF"))
+df$Condition2 <- factor(df$Condition2, levels=c("C","CFN","CFB"))
+
+# stacked bar plot of cell proportion per sampleID
+p5 <- ggplot(df, aes(x = sample, y = Freq, fill = clusters)) +
+  geom_bar(stat = "identity", position="stack") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size=8,
+                                   colour = "black"),
+        axis.text.y = element_text(size=8,
+                                   colour = "black"),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(face="bold", size=12)) +
+  labs( y = "Proportion", fill="Subtype", x="Participant") +
+  guides(fill = guide_legend(keyheight=0.8,
+                             keywidth=0.8)) +
+  scale_fill_manual(values = Annotation.colours) +
+  theme(legend.text.align = 0, legend.title = element_blank())
+
+# Wilcox test on Healthy control vs CF -----------------------------------------
+stat.test <- df %>%
+  group_by(celltype) %>%
+  wilcox_test(pct.exp ~ Condition, ref.group = "C") %>%
+  adjust_pvalue(method="BH") %>%
+  add_significance()
+
+stat.test <- stat.test %>%
+  add_xy_position(x = "celltype", dodge = 0.8)
+
+# box plot
+p6 <- ggboxplot(df, x="celltype",
+          y="pct.exp",
+          fill="Condition",
+          palette = c("#26547c","#fb8b24"), outlier.shape=NA
+          ) +
+  stat_pvalue_manual(stat.test, label = "p.adj.signif", tip.length = 0.01,
+                     bracket.nudge.y = 0, vjust = 0, hide.ns = TRUE
+                     ) +
+  labs(y="Proportion of CFTR-expressing cells") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size=10,
+                                   colour = "black"),
+        axis.title.x=element_blank(),
+        axis.text.y = element_text(size=8,
+                                   colour = "black"),
+        legend.text = element_text(size = 10),
+        legend.position = "right",
+        legend.title = element_blank())
+
+# Wilcox test on pairwise comparisons of control, CFN and CFB --------
+stat.test <- df %>%
+  group_by(celltype) %>%
+  wilcox_test(pct.exp ~ Condition2, ref.group = "C") %>%
+  adjust_pvalue(method="BH") %>%
+  add_significance()
+
+stat.test
+stat.test <- stat.test %>%
+  add_xy_position(x = "celltype", dodge = 0.8)
+
+# box plot
+p7 <- ggboxplot(df, x="celltype",
+          y="pct.exp",
+          fill="Condition2",
+          palette = Condition2.colours, outlier.shape=NA
+          ) +
+  stat_pvalue_manual(stat.test, label = "p.adj.signif", tip.length = 0.01,
+                     bracket.nudge.y = 0, vjust = 0, hide.ns = TRUE
+                     ) +
+  labs(y="Proportion of CFTR-expressing cells") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size=10,
+                                   colour = "black"),
+        axis.title.x=element_blank(),
+        axis.text.y = element_text(size=8,
+                                   colour = "black"),
+        legend.text = element_text(size = 10),
+        legend.position = "right",
+        legend.title = element_blank())
+
+p6
+p7
+
+```
+
+# 5 Save figure
+
+```{r}
+# celltype <- "combined"
+# if(!dir.exists(here("output","plots",celltype))) {
+#   dir.create(here("output","plots",celltype),recursive=TRUE)
+# }
+# 
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 1600)
+# 
+# # batch effect
+# suppressWarnings((p1a|p1b)) +
+#   theme(plot.tag = element_text(size = 14, face = "bold", family="Ariel"))
+# ggsave(plot=last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = here("output","plots",celltype,"bal_combined.umap.groupByBatch.jpeg"),
+#        height=3,
+#        width=8)
+# 
+# suppressWarnings(p1c) +
+#   theme(plot.tag = element_text(size = 14, face = "bold", family="Ariel"))
+# ggsave(plot=last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = here("output","plots",celltype,"bal_combined.umap.splitByBatch.jpeg"),
+#        height=3,
+#        width=13)
+# 
+# # umap
+# p1 +
+#   theme(plot.tag = element_text(size = 14, face = "bold"))
+# 
+# ggsave(plot=last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = here("output","plots",celltype,"bal_combined.umap.jpeg"),
+#        height=3.5,
+#        width=10.5)
+# 
+# # no split
+# # umap
+# p1.nosplit +
+#   theme(plot.tag = element_text(size = 14, face = "bold", family="Ariel"))
+# 
+# ggsave(plot=last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = here("output","plots",celltype,"bal_combined_nosplit.umap.jpeg"),
+#        height=4,
+#        width=5)
+# 
+# # proportion
+# p2 +
+#   theme(plot.tag = element_text(size = 14, face = "bold", family="Ariel"))
+# 
+# ggsave(plot=last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = here("output","plots",celltype,"bal_combined.prop.jpeg"),
+#        height=3,
+#        width=6)
+# 
+# # dotplot of marker genes
+# suppressWarnings(print(p3 +
+#   theme(plot.tag = element_text(size = 14, face = "bold", family="Ariel"))))
+# 
+# ggsave(plot=last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = here("output","plots",celltype,"bal_combined.dotplot.jpeg"),
+#        height=4.5,
+#        width=10)
+# 
+# # Prolif M UMAP
+# p4 +
+#   theme(plot.tag = element_text(size = 14, face = "bold"))
+# 
+# ggsave(plot=last_plot(),
+#        device="jpeg",
+#        dpi=1600,
+#        filename = here("output","plots",celltype,"ProlifM.smallumap.jpeg"),
+#        height=3,
+#        width=3,
+#        bg = "transparent")
+# 
+# showtext::showtext_auto()
+# showtext::showtext_opts(dpi = 100)
+```
+
+# 6 Save object
+
+```{r}
+if(!dir.exists(here("data","SCEs","manual.annot"))) {
+  dir.create(here("data","SCEs","manual.annot"), recursive = TRUE)
+}
+
+out <- here("data","SCEs","manual.annot","bal_RecM.SEU.qs")
+if(!file.exists(out)) {
+  s <- subset(seu, celltype == "RecM")
+  qsave(s,file=out,nthreads =16)
+}
+
+out <- here("data","SCEs","manual.annot","bal_AM.SEU.qs")
+if(!file.exists(out)) {
+  s <- subset(seu, celltype %in% c("AM","Prolif M","RecM"))
+  qsave(s,file=out,nthreads =24)
+}
+
+out <- here("data","SCEs","manual.annot","bal_Epithelial.SEU.qs")
+if(!file.exists(out)) {
+  s <- subset(seu, celltype == "Epithelial")
+  qsave(s,file=out,nthreads =16)
+}
+
+# 18.07.2025
+out <- here("data","SCEs","analysis","bal.SEU.qs")
+if(!file.exists(out)) {
+  qsave(seu,file=out,nthreads =24)
+}
+```
+
+# 7 Save annotation
+
+```{r}
+# 1) Write out annotations from the T cell subclustering seu
+out_dir  <- here("data", "annotation")
+out_file <- file.path(out_dir, "bal_annotations.csv")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+ann <- tibble(
+  cell      = rownames(seu@meta.data),
+  sampleID  = seu$sampleID,
+  subtype   = as.character(seu$celltype)
+)
+
+readr::write_csv(ann, out_file)
+out_file
+
+```
